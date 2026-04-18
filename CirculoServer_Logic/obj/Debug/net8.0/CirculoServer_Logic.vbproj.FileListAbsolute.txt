@@ -1,0 +1,14 @@
+C:\Users\zahid\Documents\CirculoServer_Logic\bin\Debug\net8.0\CirculoServer_Logic.exe
+C:\Users\zahid\Documents\CirculoServer_Logic\bin\Debug\net8.0\CirculoServer_Logic.deps.json
+C:\Users\zahid\Documents\CirculoServer_Logic\bin\Debug\net8.0\CirculoServer_Logic.runtimeconfig.json
+C:\Users\zahid\Documents\CirculoServer_Logic\bin\Debug\net8.0\CirculoServer_Logic.dll
+C:\Users\zahid\Documents\CirculoServer_Logic\bin\Debug\net8.0\CirculoServer_Logic.pdb
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\CirculoServer_Logic.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\CirculoServer_Logic.AssemblyInfoInputs.cache
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\CirculoServer_Logic.AssemblyInfo.vb
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\CirculoServer_Logic.vbproj.CoreCompileInputs.cache
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\CirculoServer_Logic.dll
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\refint\CirculoServer_Logic.dll
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\CirculoServer_Logic.pdb
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\CirculoServer_Logic.genruntimeconfig.cache
+C:\Users\zahid\Documents\CirculoServer_Logic\obj\Debug\net8.0\ref\CirculoServer_Logic.dll
