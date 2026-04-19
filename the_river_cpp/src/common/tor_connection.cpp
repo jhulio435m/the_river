@@ -53,6 +53,72 @@ namespace {
 
 #ifdef _WIN32
 HANDLE g_torProcessHandle = NULL;
+
+bool FileExists(const std::string& path) {
+    DWORD attrs = GetFileAttributesA(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::string ParentDir(const std::string& path) {
+    size_t slash = path.find_last_of("\\/");
+    if (slash == std::string::npos) return ".";
+    return path.substr(0, slash);
+}
+
+void CopyIfPresent(const std::string& src, const std::string& dst) {
+    if (!FileExists(src) || FileExists(dst)) return;
+    if (CopyFileA(src.c_str(), dst.c_str(), TRUE)) {
+        AppendTorLog("Tor bootstrap asset copied: " + src + " -> " + dst);
+    }
+}
+
+std::string FindExistingTorBinary() {
+    const std::vector<std::string> candidates = {
+        "tor_bin\\tor.exe",
+        "TorBin\\tor.exe",
+        "..\\TorBin\\tor.exe",
+        "..\\the_river\\TorBin\\tor.exe",
+        "..\\CirculoServer\\tor.exe"
+    };
+    for (const std::string& candidate : candidates) {
+        if (FileExists(candidate)) return candidate;
+    }
+
+    char resolved[MAX_PATH] = {0};
+    DWORD found = SearchPathA(NULL, "tor.exe", NULL, MAX_PATH, resolved, NULL);
+    if (found > 0 && found < MAX_PATH) {
+        return resolved;
+    }
+    return {};
+}
+
+bool PrepareTorBootstrap(const std::string& torExe) {
+    _mkdir("tor_bin");
+
+    if (FileExists(torExe)) return true;
+
+    std::string existingTor = FindExistingTorBinary();
+    if (!existingTor.empty()) {
+        AppendTorLog("Tor binary found locally: " + existingTor);
+        CopyIfPresent(existingTor, torExe);
+
+        std::string baseDir = ParentDir(existingTor);
+        CopyIfPresent(baseDir + "\\geoip", "tor_bin\\geoip");
+        CopyIfPresent(baseDir + "\\geoip6", "tor_bin\\geoip6");
+        CopyIfPresent(baseDir + "\\torrc", "tor_bin\\torrc");
+    }
+
+    if (FileExists(torExe)) return true;
+
+    AppendTorLog("Tor binary missing. Downloading bootstrap...");
+    const char* torUrl = "https://github.com/the-river-project/tor-static/releases/download/v1.0/tor.exe";
+    HRESULT hr = URLDownloadToFileA(NULL, torUrl, torExe.c_str(), 0, NULL);
+    if (FAILED(hr)) {
+        AppendTorLog("Bootstrap download failed. HRESULT=" + std::to_string(hr));
+        return false;
+    }
+    return true;
+}
 #else
 pid_t g_torPid = 0;
 #endif
@@ -88,19 +154,9 @@ bool EnsureLocalTorIsRunning() {
     AppendTorLog("Tor proxy not found. Initializing auto-deploy...");
 
 #ifdef _WIN32
-    const char* torFolder = "tor_bin";
-    const char* torExe = "tor_bin\\tor.exe";
-    _mkdir(torFolder);
-
-    if (GetFileAttributesA(torExe) == INVALID_FILE_ATTRIBUTES) {
-        AppendTorLog("Tor binary missing. Downloading bootstrap...");
-        // URL de respaldo de binario Tor minimalista (ejemplo)
-        const char* torUrl = "https://github.com/the-river-project/tor-static/releases/download/v1.0/tor.exe";
-        HRESULT hr = URLDownloadToFileA(NULL, torUrl, torExe, 0, NULL);
-        if (FAILED(hr)) {
-            AppendTorLog("Bootstrap download failed. HRESULT=" + std::to_string(hr));
-            return false;
-        }
+    const std::string torExe = "tor_bin\\tor.exe";
+    if (!PrepareTorBootstrap(torExe)) {
+        return false;
     }
 
     STARTUPINFOA si = { sizeof(si) };
@@ -108,8 +164,8 @@ bool EnsureLocalTorIsRunning() {
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE; // Ejecución invisible
 
-    std::string cmd = std::string(torExe) + " --socksport 9050 --DataDirectory tor_data";
-    if (CreateProcessA(NULL, (char*)cmd.c_str(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    std::string cmd = torExe + " --SocksPort 9050 --DataDirectory tor_data";
+    if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, "tor_bin", &si, &pi)) {
         g_torProcessHandle = pi.hProcess;
         CloseHandle(pi.hThread);
         AppendTorLog("Local Tor process started invisibly.");

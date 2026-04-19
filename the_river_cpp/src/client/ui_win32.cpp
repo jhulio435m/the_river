@@ -125,7 +125,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     // CARGA DE FUENTE BBS CON SOPORTE PARA TILDES
     ImFontConfig font_cfg;
     font_cfg.FontDataOwnedByAtlas = false;
-    // Courier New a 26px para el look BBS definitivo
+    // Courier New base para el look BBS.
     io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\cour.ttf", 26.0f, NULL, io.Fonts->GetGlyphRangesDefault());
     
     ApplyEliteStyle();

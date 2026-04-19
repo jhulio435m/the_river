@@ -57,21 +57,41 @@ bool ShouldThrottle(double now, double& lastTick, double intervalSeconds) {
 }
 
 void DrawInfoBand(const char* label, const std::string& value, const ImVec4& color) {
+    const float wrapWidth = ImGui::GetContentRegionAvail().x - 18.0f;
+    const float compactScale = 0.72f;
+    ImGui::SetWindowFontScale(compactScale);
+    const float labelHeight = ImGui::GetTextLineHeight();
+    const float bodyHeight = ImGui::CalcTextSize(value.c_str(), nullptr, false, wrapWidth / compactScale).y;
+    ImGui::SetWindowFontScale(1.0f);
+
+    const float boxHeight = labelHeight + bodyHeight + 28.0f;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(color.x * 0.12f, color.y * 0.12f, color.z * 0.12f, 0.95f));
-    ImGui::BeginChild(label, ImVec2(0, 58), true);
+    ImGui::BeginChild(label, ImVec2(0, boxHeight), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetWindowFontScale(compactScale);
     ImGui::TextColored(color, "%s", label);
     ImGui::TextWrapped("%s", value.c_str());
+    ImGui::SetWindowFontScale(1.0f);
     ImGui::EndChild();
     ImGui::PopStyleColor();
 }
 
 void DrawErrorBanner(const std::string& error) {
     if (error.empty()) return;
+    const float wrapWidth = ImGui::GetContentRegionAvail().x - 18.0f;
+    const float compactScale = 0.72f;
+    ImGui::SetWindowFontScale(compactScale);
+    const float titleHeight = ImGui::GetTextLineHeight();
+    const float bodyHeight = ImGui::CalcTextSize(error.c_str(), nullptr, false, wrapWidth / compactScale).y;
+    ImGui::SetWindowFontScale(1.0f);
+
+    const float boxHeight = titleHeight + bodyHeight + 34.0f;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.24f, 0.03f, 0.02f, 0.96f));
-    ImGui::BeginChild("##error_banner", ImVec2(0, 64), true);
+    ImGui::BeginChild("##error_banner", ImVec2(0, boxHeight), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetWindowFontScale(compactScale);
     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.32f, 1.0f), "ULTIMO ERROR");
     ImGui::Separator();
     ImGui::TextWrapped("%s", error.c_str());
+    ImGui::SetWindowFontScale(1.0f);
     ImGui::EndChild();
     ImGui::PopStyleColor();
 }
@@ -147,6 +167,8 @@ void RenderChatUi(ChatClient& client,
     const std::string statusDetail = state.StatusDetail();
     const std::string lastError = state.LastError();
     const bool authPending = state.IsAuthActionPending();
+    const bool credentialPending = state.IsCredentialChangePending();
+    const bool mustChangeCredentials = state.MustChangeCredentials() || connState == ConnState::FIRST_LOGIN_REQUIRED;
     const bool isAuthenticated = state.IsAuthenticated() && connState == ConnState::AUTHENTICATED;
 
     ImVec4 bbsBlue = ImVec4(0.0f, 0.0f, 0.66f, 1.0f);
@@ -204,20 +226,78 @@ void RenderChatUi(ChatClient& client,
             ImGui::Separator();
             ImGui::TextWrapped("%s", statusDetail.c_str());
             ImGui::EndChild();
+        } else if (mustChangeCredentials) {
+            ImGui::SetCursorPos(ImVec2(width * 0.5f - 250.0f, height * 0.5f - 180.0f));
+            ImGui::BeginChild("##FirstLoginPanel", ImVec2(500, 360), true);
+            ImGui::TextColored(bbsMagenta, "PRIMER ACCESO // CAMBIO OBLIGATORIO");
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextWrapped("Debes definir un nuevo identificador y una nueva clave antes de entrar al chat.");
+            ImGui::Spacing();
+
+            bool submitCredentialChange = false;
+            bool focusNewPass = false;
+            ImGui::Text("NEW IDENT:"); ImGui::SameLine();
+            focusNewPass = ImGui::InputText("##NEW_ID", buffers.newUser, 32, ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::Text("NEW KEY :"); ImGui::SameLine();
+            if (focusNewPass) ImGui::SetKeyboardFocusHere();
+            submitCredentialChange |= ImGui::InputText("##NEW_PW", buffers.newPass, 32,
+                                                       ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::Spacing();
+
+            const std::string newUser = TrimCopy(buffers.newUser);
+            const std::string newPass = TrimCopy(buffers.newPass);
+            const bool canSubmitCredentialChange =
+                !newUser.empty() && !newPass.empty() && !credentialPending;
+
+            if (!canSubmitCredentialChange) ImGui::BeginDisabled();
+            if (ImGui::Button("ACTUALIZAR CREDENCIALES", ImVec2(-1, 42))) {
+                submitCredentialChange = true;
+            }
+            if (!canSubmitCredentialChange) ImGui::EndDisabled();
+
+            if (submitCredentialChange && canSubmitCredentialChange) {
+                client.SendFirstLoginChange(newUser, newPass);
+            }
+
+            ImGui::Spacing();
+            DrawInfoBand("UPLINK STATUS", statusDetail, StatusColor(connState));
+            DrawErrorBanner(lastError);
+            ImGui::EndChild();
         } else {
-            ImGui::SetCursorPos(ImVec2(width * 0.5f - 220.0f, height * 0.5f - 120.0f));
-            ImGui::BeginChild("##AccessPanel", ImVec2(440, 240), true);
+            ImGui::SetCursorPos(ImVec2(width * 0.5f - 220.0f, height * 0.5f - 150.0f));
+            ImGui::BeginChild("##AccessPanel", ImVec2(440, 300), true);
             ImGui::TextColored(bbsMagenta, "CHARON SUITE // ACCESS TERMINAL");
             ImGui::Separator();
             ImGui::Spacing();
+
+            bool submitLogin = false;
+            bool focusLoginPass = false;
             ImGui::Text("IDENT:"); ImGui::SameLine();
-            ImGui::InputText("##ID", buffers.user, 32);
+            focusLoginPass = ImGui::InputText("##ID", buffers.user, 32, ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::Text("KEY  :"); ImGui::SameLine();
-            ImGui::InputText("##PW", buffers.pass, 32, ImGuiInputTextFlags_Password);
+            if (focusLoginPass) ImGui::SetKeyboardFocusHere();
+            submitLogin |= ImGui::InputText("##PW", buffers.pass, 32,
+                                            ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::Spacing();
+
+            const std::string user = TrimCopy(buffers.user);
+            const std::string pass = TrimCopy(buffers.pass);
+            const bool canSubmit = !user.empty() && !pass.empty() && !authPending;
+
+            if (!canSubmit) ImGui::BeginDisabled();
             if (ImGui::Button("ESTABLISH UPLINK", ImVec2(-1, 40))) {
-                client.SendLogin(buffers.user, buffers.pass);
+                submitLogin = true;
             }
+            if (!canSubmit) ImGui::EndDisabled();
+
+            if (submitLogin && canSubmit) {
+                client.SendLogin(user, pass);
+            }
+
+            ImGui::Spacing();
+            DrawInfoBand("UPLINK STATUS", statusDetail, StatusColor(connState));
+            DrawErrorBanner(lastError);
             ImGui::EndChild();
         }
     } else {
@@ -242,6 +322,8 @@ void RenderChatUi(ChatClient& client,
         // PANEL DERECHO: CHAT
         ImGui::SetCursorPos(ImVec2(width * 0.18f + 5, 42));
         ImGui::BeginChild("##Feed", ImVec2(width * 0.82f - 5, height - 168), false); // Espacio reducido para el nuevo layout
+        ImGui::SetWindowFontScale(0.76f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1));
         std::vector<LogEntry> logs = state.SnapshotLogs();
         for (const auto& entry : logs) {
             if (entry.isSystem) {
@@ -253,6 +335,8 @@ void RenderChatUi(ChatClient& client,
             }
         }
         ImGui::SetScrollHereY(1.0f);
+        ImGui::PopStyleVar();
+        ImGui::SetWindowFontScale(1.0f);
         ImGui::EndChild();
 
         // --- NUEVA BARRA AZUL SEPARADORA (ENCIMA DEL INPUT) ---

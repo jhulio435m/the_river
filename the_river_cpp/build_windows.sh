@@ -19,6 +19,6 @@ echo ">>> COMPILANDO CONSOLA ADMIN (.EXE)..."
 i686-w64-mingw32-g++ -std=c++17 -O2 -o the_river_admin.exe $ADMIN_SRC $COMMON_SRC -lws2_32 -static-libgcc -static-libstdc++ -I./include -I.
 
 echo ">>> COMPILANDO CLIENTE GUI (.EXE)..."
-i686-w64-mingw32-g++ -std=c++17 -O2 -o the_river_client.exe $CLIENT_SRC $COMMON_SRC $IMGUI_SRC -lopengl32 -lgdi32 -limm32 -ldwmapi -lws2_32 -static-libgcc -static-libstdc++ -I./include -I. -I./imgui_src -I./imgui_src/backends
+i686-w64-mingw32-g++ -std=c++17 -O2 -mwindows -o the_river_client.exe $CLIENT_SRC $COMMON_SRC $IMGUI_SRC -lopengl32 -lgdi32 -limm32 -ldwmapi -lws2_32 -static-libgcc -static-libstdc++ -I./include -I. -I./imgui_src -I./imgui_src/backends
 
 echo ">>> PROCESO FINALIZADO."

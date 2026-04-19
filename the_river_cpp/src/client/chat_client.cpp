@@ -72,7 +72,29 @@ bool ChatClient::ConsumeQueuedAutoLogin(std::string& user, std::string& pass) {
 int ChatClient::SendRawLine(const std::string& payload) {
     std::lock_guard<std::mutex> lock(socketMutex_);
     if (!IsSocketValid(socket_)) return -1;
-    return send(socket_, payload.c_str(), (int)payload.size(), 0);
+
+    int totalSent = 0;
+    while (totalSent < static_cast<int>(payload.size())) {
+        int sent = send(
+            socket_,
+            payload.c_str() + totalSent,
+            static_cast<int>(payload.size()) - totalSent,
+            0);
+        if (sent <= 0) {
+#ifdef _WIN32
+            AppendClientLog("SendRawLine failed totalSent=" + std::to_string(totalSent) +
+                            " err=" + std::to_string(WSAGetLastError()));
+#else
+            AppendClientLog("SendRawLine failed totalSent=" + std::to_string(totalSent) +
+                            " err=" + std::to_string(errno));
+#endif
+            return -1;
+        }
+        totalSent += sent;
+    }
+
+    AppendClientLog("SendRawLine ok bytes=" + std::to_string(totalSent));
+    return totalSent;
 }
 
 void ChatClient::CloseCurrentSocket() {
@@ -230,12 +252,14 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
                 state_.SetConnectionState(ConnState::TOR_READY);
                 state_.SetStatusDetail("Canal Tor listo. Esperando nuevas credenciales.");
                 state_.SetLastError("Credenciales incorrectas.");
+                state_.AddSystemLog("SYSTEM: CREDENCIALES INCORRECTAS.");
             } else if (line.find("HWID NO RECONOCIDO") != std::string::npos) {
                 AppendClientLog("ReceiveLoop line=HWID NO RECONOCIDO");
                 state_.SetAuthActionPending(false);
                 state_.SetConnectionState(ConnState::TOR_READY);
                 state_.SetStatusDetail("Canal Tor listo. Acceso denegado por HWID.");
                 state_.SetLastError("Esta maquina no coincide con el HWID autorizado.");
+                state_.AddSystemLog("SYSTEM: HWID NO RECONOCIDO.");
             } else if (line.find("ACCESO BLOQUEADO") != std::string::npos) {
                 AppendClientLog("ReceiveLoop line=ACCESO BLOQUEADO");
                 state_.SetAuthActionPending(false);
@@ -243,12 +267,14 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
                 state_.SetConnectionState(ConnState::TOR_READY);
                 state_.SetStatusDetail("Canal Tor listo. Acceso bloqueado.");
                 state_.SetLastError("Acceso bloqueado para esta maquina.");
+                state_.AddSystemLog("SYSTEM: ACCESO BLOQUEADO.");
             } else if (line.find("ERROR ACTUALIZANDO USUARIO") != std::string::npos) {
                 AppendClientLog("ReceiveLoop line=ERROR ACTUALIZANDO USUARIO");
                 state_.SetCredentialChangePending(false);
                 state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
                 state_.SetStatusDetail("No se pudo completar el cambio inicial.");
                 state_.SetLastError("No se pudo actualizar el usuario o la clave.");
+                state_.AddSystemLog("SYSTEM: ERROR ACTUALIZANDO USUARIO.");
             } else if (line.find("[PM]:") == 0) {
                 AppendClientLog("ReceiveLoop line=PM");
                 state_.AddIncomingWireMessage(line.substr(5), CurrentUser(), true);
