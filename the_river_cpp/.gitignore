@@ -1,0 +1,13 @@
+# Binarios
+*.exe
+*.o
+the_river_client
+the_river_server
+the_river_admin
+
+# Bases de datos y logs
+*.db
+*.log
+
+# Otros
+tor_server_wsl.conf

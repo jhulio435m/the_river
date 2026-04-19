@@ -1,0 +1,41 @@
+# .gitignore raíz para The River
+
+# .NET / Visual Studio
+[Bb]in/
+[Oo]bj/
+[Rr]elease/
+[Dd]ebug/
+.vs/
+*.user
+*.suo
+*.pdb
+*.dll
+*.exe
+*.cache
+*.log
+
+# C++ / Objetos
+*.o
+*.obj
+the_river_client
+the_river_server
+the_river_admin
+
+# Tor / Datos temporales
+the_river/bin/
+the_river/obj/
+CirculoServer_Logic/bin/
+CirculoServer_Logic/obj/
+the_river/TorBin/*.exe
+the_river/TorBin/geoip*
+the_river/TorBin/tor_data/
+
+# SQLite
+*.db
+*.db-journal
+
+# Otros
+.DS_Store
+ipch/
+*.opensdf
+*.sdf

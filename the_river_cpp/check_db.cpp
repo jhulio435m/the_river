@@ -3,7 +3,7 @@
 
 int main() {
     sqlite3* db;
-    if (sqlite3_open("/home/jhulio/the_river/Orchestrator/secure_river.db", &db) != SQLITE_OK) {
+    if (sqlite3_open("secure_river.db", &db) != SQLITE_OK) {
         std::cerr << "Error abriendo DB" << std::endl;
         return 1;
     }

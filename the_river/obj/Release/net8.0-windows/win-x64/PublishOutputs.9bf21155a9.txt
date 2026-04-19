@@ -1,6 +1,0 @@
-C:\Users\zahid\Desktop\riverRelease\the_river.pdb
-C:\Users\zahid\Desktop\riverRelease\TorBin\geoip
-C:\Users\zahid\Desktop\riverRelease\TorBin\geoip6
-C:\Users\zahid\Desktop\riverRelease\TorBin\tor.exe
-C:\Users\zahid\Desktop\riverRelease\the_river.dll.config
-C:\Users\zahid\Desktop\riverRelease\the_river.exe
