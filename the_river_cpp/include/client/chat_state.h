@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "client/attachment_types.h"
 #include "client/chat_types.h"
 
 class ChatState {
@@ -33,6 +35,8 @@ public:
     std::string LastError() const;
     void SetLastError(const std::string& value);
     void ClearLastError();
+    std::string CurrentIdentity() const;
+    void SetCurrentIdentity(const std::string& user);
 
     bool ConsumeNewMessageFlag();
     void MarkNewMessage();
@@ -41,6 +45,12 @@ public:
     void AddSystemLog(const std::string& message);
     void AddOutgoingChat(const std::string& user, const std::string& message);
     void AddOutgoingPrivateMessage(const std::string& user, const std::string& target, const std::string& message);
+    void AddAttachmentOffer(const std::string& user, const AttachmentPayload& attachment);
+    bool FindAttachment(const std::string& user, const std::string& attachmentId, AttachmentPayload& attachment) const;
+    bool UpdateAttachmentState(const std::string& user,
+                               const std::string& attachmentId,
+                               AttachmentTransferState state,
+                               const std::string& localPath = "");
     void ClearLogs();
 
     std::vector<LogEntry> SnapshotLogs() const;
@@ -61,6 +71,7 @@ private:
     mutable std::mutex uiStateMutex_;
     std::string statusDetail_;
     std::string lastError_;
+    std::string currentIdentity_;
 
     mutable std::mutex chatMutex_;
     std::deque<LogEntry> chatLogs_;

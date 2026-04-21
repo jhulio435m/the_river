@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "client/attachment_types.h"
+
 enum class ConnState {
     DISCONNECTED,
     CONNECTING,
@@ -19,4 +21,6 @@ struct LogEntry {
     std::string text;
     bool isSystem = false;
     bool isPM = false;
+    bool isAttachment = false;
+    AttachmentPayload attachment;
 };

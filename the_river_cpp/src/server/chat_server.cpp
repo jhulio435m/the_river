@@ -63,6 +63,17 @@ void ChatServer::BroadcastUsers() {
         if (cl.auth) SendLine(sock, list);
 }
 
+bool ChatServer::SendDirectLineToUser(const std::string& toNick, const std::string& line) {
+    std::lock_guard<std::mutex> lk(clientsMutex_);
+    for (auto& [sock, cl] : clients_) {
+        if (cl.auth && cl.nick == toNick) {
+            SendLine(sock, line);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ChatServer::SendPrivateMessage(const std::string& toNick, const std::string& fromNick, const std::string& encPayload) {
     std::lock_guard<std::mutex> lk(clientsMutex_);
     for (auto& [sock, cl] : clients_) {
@@ -369,6 +380,8 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 } else {
                     SendLine(clientSocket, "SYSTEM: ERROR ACTUALIZANDO USUARIO.");
                 }
+            } else if (StartsWith(raw, "[ATTACH]:") && authed) {
+                Broadcast("[ATTACH]:" + currentNick + ":" + raw.substr(9));
             } else if (StartsWith(raw, "[PM]:") && authed) {
                 std::string rest = raw.substr(5);
                 size_t firstSep = rest.find(':');

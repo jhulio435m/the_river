@@ -41,7 +41,7 @@ int main() {
 
     ChatState state;
     ChatClient client(state);
-    ChatUiBuffers buffers;
+    ClientUiState uiState;
     client.Start();
 
     double lastTitleUpdate = 0.0;
@@ -62,7 +62,7 @@ int main() {
         int width = 0;
         int height = 0;
         glfwGetFramebufferSize(window, &width, &height);
-        RenderChatUi(client, state, buffers, (float)width, (float)height);
+        RenderChatUi(client, state, uiState, (float)width, (float)height);
 
         ImGui::Render();
         glViewport(0, 0, width, height);

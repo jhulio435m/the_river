@@ -1,9 +1,12 @@
 # Binarios
 *.exe
 *.o
+sqlite3.o*
 the_river_client
 the_river_server
 the_river_admin
+the_river_client_wsl
+the_river_server_wsl
 
 # Bases de datos y logs
 *.db
@@ -11,3 +14,4 @@ the_river_admin
 
 # Otros
 tor_server_wsl.conf
+tor_bin/

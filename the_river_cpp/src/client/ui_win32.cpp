@@ -137,7 +137,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     ChatState state;
     ChatClient client(state);
-    ChatUiBuffers buffers;
+    ClientUiState uiState;
     client.Start();
 
     double lastTitleUpdate = 0.0;
@@ -167,7 +167,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             ::SetWindowTextA(hwnd, title.c_str());
         }
 
-        RenderChatUi(client, state, buffers, (float)g_width, (float)g_height);
+        RenderChatUi(client, state, uiState, (float)g_width, (float)g_height);
 
         ImGui::Render();
         glViewport(0, 0, g_width, g_height);

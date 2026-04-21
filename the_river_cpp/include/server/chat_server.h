@@ -41,6 +41,7 @@ private:
     void SendLine(SocketHandle sock, const std::string& msg);
     void Broadcast(const std::string& msg);
     void BroadcastUsers();
+    bool SendDirectLineToUser(const std::string& toNick, const std::string& line);
     bool SendPrivateMessage(const std::string& toNick, const std::string& fromNick, const std::string& encPayload);
     bool KickUser(const std::string& nick, const std::string& reason);
     void DisconnectByHwid(const std::string& hwid, const std::string& reason);

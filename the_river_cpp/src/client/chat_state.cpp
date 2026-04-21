@@ -4,6 +4,7 @@
 #include <ctime>
 #include <sstream>
 
+#include "client/attachment_utils.h"
 #include "common/shared_config.h"
 #include "include/aes.h"
 
@@ -74,6 +75,16 @@ void ChatState::ClearLastError() {
     lastError_.clear();
 }
 
+std::string ChatState::CurrentIdentity() const {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    return currentIdentity_;
+}
+
+void ChatState::SetCurrentIdentity(const std::string& user) {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    currentIdentity_ = user;
+}
+
 bool ChatState::ConsumeNewMessageFlag() {
     return newMessage_.exchange(false);
 }
@@ -100,7 +111,6 @@ void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::str
     msg.erase(std::remove(msg.begin(), msg.end(), '\r'), msg.end());
     msg.erase(std::remove(msg.begin(), msg.end(), '\n'), msg.end());
 
-    // 1. Detectar protocolo de usuarios (debe ser exacto)
     if (msg.rfind("[USERS]:", 0) == 0 || msg.rfind("[[USERS]]:", 0) == 0) {
         size_t startPos = (msg[0] == '[') ? (msg[1] == '[' ? 9 : 8) : 8;
         std::lock_guard<std::mutex> usersLock(usersMutex_);
@@ -118,22 +128,17 @@ void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::str
     std::lock_guard<std::mutex> chatLock(chatMutex_);
     const std::string timestamp = GetTimestamp();
 
-    // 2. Si es un mensaje de chat (contiene ':') y NO es del sistema
     if (msg.find(':') != std::string::npos && msg.find("SYSTEM") == std::string::npos) {
         size_t sep = msg.find(':');
         std::string user = msg.substr(0, sep);
         std::string payload = msg.substr(sep + 1);
-        
-        // Intentar desencriptar; si falla o el prefijo no coincide, tratar como texto plano
+
         std::string dec = AESHelper::Decrypt(payload, river::kAesKey, "");
-        if (dec.find("[DECRYPT_ERR]") != std::string::npos) {
-            dec = payload; // Fallback a texto plano si la encriptación falla
-        }
-        
+        if (dec.find("[DECRYPT_ERR]") != std::string::npos) dec = payload;
+
         PushLogLocked({timestamp, user, dec, false, isPm});
         if (user != currentUser) MarkNewMessage();
     } else {
-        // 3. Mensajes del sistema puros
         PushLogLocked({timestamp, "SYSTEM", msg, true, false});
     }
 }
@@ -151,6 +156,52 @@ void ChatState::AddOutgoingChat(const std::string& user, const std::string& mess
 void ChatState::AddOutgoingPrivateMessage(const std::string& user, const std::string& target, const std::string& message) {
     std::lock_guard<std::mutex> chatLock(chatMutex_);
     PushLogLocked({GetTimestamp(), user, "[PM->" + target + "] " + message, false, true});
+}
+
+void ChatState::AddAttachmentOffer(const std::string& user, const AttachmentPayload& attachment) {
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    for (auto& entry : chatLogs_) {
+        if (entry.isAttachment && entry.user == user && entry.attachment.id == attachment.id) {
+            entry.attachment = attachment;
+            entry.text = "[" + AttachmentKindToLabel(attachment.kind) + "] " + attachment.displayName;
+            return;
+        }
+    }
+
+    PushLogLocked({GetTimestamp(),
+                   user,
+                   "[" + AttachmentKindToLabel(attachment.kind) + "] " + attachment.displayName,
+                   false,
+                   false,
+                   true,
+                   attachment});
+    if (user != CurrentIdentity()) MarkNewMessage();
+}
+
+bool ChatState::FindAttachment(const std::string& user, const std::string& attachmentId, AttachmentPayload& attachment) const {
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    for (auto it = chatLogs_.rbegin(); it != chatLogs_.rend(); ++it) {
+        if (it->isAttachment && it->user == user && it->attachment.id == attachmentId) {
+            attachment = it->attachment;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ChatState::UpdateAttachmentState(const std::string& user,
+                                      const std::string& attachmentId,
+                                      AttachmentTransferState state,
+                                      const std::string& localPath) {
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    for (auto it = chatLogs_.rbegin(); it != chatLogs_.rend(); ++it) {
+        if (it->isAttachment && it->user == user && it->attachment.id == attachmentId) {
+            it->attachment.state = state;
+            if (!localPath.empty()) it->attachment.localPath = localPath;
+            return true;
+        }
+    }
+    return false;
 }
 
 void ChatState::ClearLogs() {
