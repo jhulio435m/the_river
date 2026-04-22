@@ -1,5 +1,7 @@
 #include <cstdio>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include <GLFW/glfw3.h>
 
@@ -19,6 +21,50 @@ void RequestWindowAttention(GLFWwindow* window) {
 #endif
 }
 
+bool FileExists(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    return input.good();
+}
+
+std::string FindLinuxFontPath() {
+    const std::vector<std::string> candidates{
+        "imgui_src/misc/fonts/Cousine-Regular.ttf",
+        "imgui_src/misc/fonts/DroidSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf"
+    };
+    for (const std::string& candidate : candidates) {
+        if (FileExists(candidate)) return candidate;
+    }
+    return "";
+}
+
+float DetectUiScale(GLFWwindow* window) {
+    float xscale = 1.0f;
+    float yscale = 1.0f;
+#if defined(GLFW_VERSION_MAJOR) && (GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 3))
+    glfwGetWindowContentScale(window, &xscale, &yscale);
+#else
+    (void)window;
+#endif
+    const float scale = xscale > yscale ? xscale : yscale;
+    return scale < 1.0f ? 1.0f : scale;
+}
+
+void ConfigureLinuxUi(GLFWwindow* window) {
+    ImGuiIO& io = ImGui::GetIO();
+    const float uiScale = DetectUiScale(window);
+    ImGui::GetStyle().ScaleAllSizes(uiScale);
+
+    const std::string fontPath = FindLinuxFontPath();
+    if (!fontPath.empty()) {
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f * uiScale, nullptr, io.Fonts->GetGlyphRangesDefault());
+    }
+}
+
 }
 
 int main() {
@@ -36,6 +82,7 @@ int main() {
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
     ApplyEliteStyle();
+    ConfigureLinuxUi(window);
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 130");
 

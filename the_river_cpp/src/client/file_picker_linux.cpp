@@ -68,6 +68,24 @@ bool TryZenityFileSelection(std::string& path) {
     return true;
 }
 
+bool TryQarmaFileSelection(std::string& path) {
+    int exitCode = -1;
+    std::string output;
+    if (!RunCommandCapture("qarma --file-selection --title='Seleccionar adjunto'", output, exitCode)) return false;
+    if (exitCode != 0 || output.empty()) return false;
+    path = output;
+    return true;
+}
+
+bool TryMateDialogFileSelection(std::string& path) {
+    int exitCode = -1;
+    std::string output;
+    if (!RunCommandCapture("matedialog --file-selection --title='Seleccionar adjunto'", output, exitCode)) return false;
+    if (exitCode != 0 || output.empty()) return false;
+    path = output;
+    return true;
+}
+
 bool TryKDialogFileSelection(std::string& path) {
     int exitCode = -1;
     std::string output;
@@ -80,6 +98,30 @@ bool TryKDialogFileSelection(std::string& path) {
 bool TryZenitySaveSelection(const std::string& fileName, std::string& path) {
     const std::string command =
         "zenity --file-selection --save --confirm-overwrite --title='Guardar adjunto como' --filename=" +
+        ShellQuote(fileName);
+    int exitCode = -1;
+    std::string output;
+    if (!RunCommandCapture(command, output, exitCode)) return false;
+    if (exitCode != 0 || output.empty()) return false;
+    path = output;
+    return true;
+}
+
+bool TryQarmaSaveSelection(const std::string& fileName, std::string& path) {
+    const std::string command =
+        "qarma --file-selection --save --confirm-overwrite --title='Guardar adjunto como' --filename=" +
+        ShellQuote(fileName);
+    int exitCode = -1;
+    std::string output;
+    if (!RunCommandCapture(command, output, exitCode)) return false;
+    if (exitCode != 0 || output.empty()) return false;
+    path = output;
+    return true;
+}
+
+bool TryMateDialogSaveSelection(const std::string& fileName, std::string& path) {
+    const std::string command =
+        "matedialog --file-selection --save --confirm-overwrite --title='Guardar adjunto como' --filename=" +
         ShellQuote(fileName);
     int exitCode = -1;
     std::string output;
@@ -113,12 +155,20 @@ bool PickAttachmentFile(AttachmentDraft& draft, std::string& error) {
         if (!TryZenityFileSelection(selectedPath)) return false;
         return BuildAttachmentDraftFromPath(selectedPath, draft, error);
     }
+    if (CommandExists("qarma")) {
+        if (!TryQarmaFileSelection(selectedPath)) return false;
+        return BuildAttachmentDraftFromPath(selectedPath, draft, error);
+    }
+    if (CommandExists("matedialog")) {
+        if (!TryMateDialogFileSelection(selectedPath)) return false;
+        return BuildAttachmentDraftFromPath(selectedPath, draft, error);
+    }
     if (CommandExists("kdialog")) {
         if (!TryKDialogFileSelection(selectedPath)) return false;
         return BuildAttachmentDraftFromPath(selectedPath, draft, error);
     }
 
-    error = "No se encontro zenity ni kdialog para seleccionar adjuntos en Linux.";
+    error = "No se encontro zenity, qarma, matedialog ni kdialog para seleccionar adjuntos en Linux.";
     return false;
 }
 
@@ -129,17 +179,29 @@ bool PickAttachmentSavePath(const AttachmentPayload& attachment, std::string& sa
         if (TryZenitySaveSelection(defaultName, savePath)) return true;
         return false;
     }
+    if (CommandExists("qarma")) {
+        if (TryQarmaSaveSelection(defaultName, savePath)) return true;
+        return false;
+    }
+    if (CommandExists("matedialog")) {
+        if (TryMateDialogSaveSelection(defaultName, savePath)) return true;
+        return false;
+    }
     if (CommandExists("kdialog")) {
         if (TryKDialogSaveSelection(defaultName, savePath)) return true;
         return false;
     }
 
-    error = "No se encontro zenity ni kdialog para elegir la ruta de guardado en Linux.";
+    error = "No se encontro zenity, qarma, matedialog ni kdialog para elegir la ruta de guardado en Linux.";
     return false;
 }
 
 bool OpenPathWithShell(const std::string& path) {
     if (CommandExists("xdg-open") && TryOpenWithCommand("xdg-open", path)) return true;
     if (CommandExists("gio") && TryOpenWithCommand("gio open", path)) return true;
+    if (CommandExists("kioclient5") && TryOpenWithCommand("kioclient5 exec", path)) return true;
+    if (CommandExists("kioclient") && TryOpenWithCommand("kioclient exec", path)) return true;
+    if (CommandExists("exo-open") && TryOpenWithCommand("exo-open", path)) return true;
+    if (CommandExists("gvfs-open") && TryOpenWithCommand("gvfs-open", path)) return true;
     return false;
 }

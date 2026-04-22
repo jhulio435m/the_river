@@ -18,6 +18,21 @@
 
 namespace {
 
+int CommandInputCallback(ImGuiInputTextCallbackData* data) {
+#ifndef _WIN32
+    const bool pasteRequested =
+        (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) ||
+        (ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Insert, false));
+    if (pasteRequested) {
+        const char* clipboard = ImGui::GetClipboardText();
+        if (clipboard && clipboard[0] != '\0') data->InsertChars(data->CursorPos, clipboard);
+    }
+#else
+    (void)data;
+#endif
+    return 0;
+}
+
 std::string TrimCopy(const char* value) {
     std::string text = value ? value : "";
     const std::size_t start = text.find_first_not_of(" \t\r\n");
@@ -204,23 +219,114 @@ bool RenderAttachmentLine(const LogEntry& entry, bool isMe, const UiPalette& pal
     return clicked;
 }
 
-void HandleAttachButton(ChatClient& client, ChatState& state) {
-    AttachmentDraft draft;
-    std::string pickerError;
-    if (!PickAttachmentFile(draft, pickerError)) {
-        if (!pickerError.empty()) state.AddSystemLog("SYSTEM: " + pickerError);
-        return;
+bool RenderCopyableLine(const std::string& id, const std::string& text, const ImVec4& color) {
+    std::vector<char> copyBuffer(text.begin(), text.end());
+    copyBuffer.push_back('\0');
+
+    const ImVec2 startCursor = ImGui::GetCursorPos();
+    ImGui::TextColored(color, "%s", text.c_str());
+    const ImVec2 endCursor = ImGui::GetCursorPos();
+
+    ImGui::SetCursorPos(startCursor);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(0.22f, 0.42f, 0.95f, 0.35f));
+    ImGui::PushItemWidth(-1.0f);
+    ImGui::InputText(
+        id.c_str(),
+        copyBuffer.data(),
+        copyBuffer.size(),
+        ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
+    ImGui::PopItemWidth();
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+    ImGui::SetCursorPos(endCursor);
+    return hovered;
+}
+
+void HandleAttachButton(ClientUiState& uiState) {
+    uiState.attachPickerOpen = true;
+    uiState.attachPickerError.clear();
+}
+
+void ResetAttachPicker(ClientUiState& uiState) {
+    uiState.attachPickerOpen = false;
+    uiState.attachPickerError.clear();
+    std::memset(uiState.attachPath, 0, sizeof(uiState.attachPath));
+}
+
+void RenderAttachPickerModal(ChatClient& client, ChatState& state, ClientUiState& uiState) {
+    if (!uiState.attachPickerOpen) return;
+
+    if (!ImGui::IsPopupOpen("##AttachPicker")) ImGui::OpenPopup("##AttachPicker");
+    bool keepOpen = true;
+    if (ImGui::BeginPopupModal("##AttachPicker", &keepOpen, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Adjuntar archivo local");
+        ImGui::Separator();
+        ImGui::TextWrapped("En Linux este flujo evita depender por completo del dialogo externo y reduce fallos de sesion en Debian.");
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(520.0f);
+        const bool submitPath = ImGui::InputText(
+            "##ATTACH_PATH",
+            uiState.attachPath,
+            IM_ARRAYSIZE(uiState.attachPath),
+            ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...", ImVec2(110, 0))) {
+            AttachmentDraft draft;
+            std::string pickerError;
+            if (PickAttachmentFile(draft, pickerError)) {
+                std::strncpy(uiState.attachPath, draft.localPath.c_str(), sizeof(uiState.attachPath) - 1);
+                uiState.attachPath[sizeof(uiState.attachPath) - 1] = '\0';
+                uiState.attachPickerError.clear();
+            } else if (!pickerError.empty()) {
+                uiState.attachPickerError = pickerError;
+            }
+        }
+
+        if (!uiState.attachPickerError.empty()) {
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", uiState.attachPickerError.c_str());
+        }
+
+        ImGui::Spacing();
+        bool shouldAttach = submitPath;
+        if (ImGui::Button("Attach", ImVec2(110, 0))) shouldAttach = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110, 0))) keepOpen = false;
+
+        if (shouldAttach) {
+            const std::string attachPath = TrimCopy(uiState.attachPath);
+            if (attachPath.empty()) {
+                uiState.attachPickerError = "Debes indicar una ruta de archivo.";
+            } else {
+                AttachmentDraft draft;
+                std::string buildError;
+                if (!BuildAttachmentDraftFromPath(attachPath, draft, buildError)) {
+                    uiState.attachPickerError = buildError;
+                } else {
+                    const std::string currentIdentity = state.CurrentIdentity();
+                    if (currentIdentity.empty()) {
+                        uiState.attachPickerError = "No hay identidad autenticada para adjuntar archivos.";
+                    } else if (!client.SendAttachment(currentIdentity, draft)) {
+                        uiState.attachPickerError = state.LastError().empty()
+                            ? "No se pudo enviar el adjunto seleccionado."
+                            : state.LastError();
+                    } else {
+                        keepOpen = false;
+                    }
+                }
+            }
+        }
+
+        ImGui::EndPopup();
     }
 
-    const std::string currentIdentity = state.CurrentIdentity();
-    if (currentIdentity.empty()) {
-        state.AddSystemLog("SYSTEM: No hay identidad autenticada para adjuntar archivos.");
-        return;
-    }
-
-    if (!client.SendAttachment(currentIdentity, draft)) {
-        state.AddSystemLog("SYSTEM: No se pudo enviar el adjunto seleccionado.");
-    }
+    if (!keepOpen) ResetAttachPicker(uiState);
 }
 
 void ResetAttachmentModal(ClientUiState& uiState) {
@@ -328,10 +434,13 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
         }
 
         ImGui::Spacing();
-        if (attachment.kind == AttachmentKind::Video && !attachment.localPath.empty()) {
+        if (attachment.kind != AttachmentKind::File && !attachment.localPath.empty()) {
             if (ImGui::Button("Open", ImVec2(110, 0))) {
                 if (!OpenPathWithShell(attachment.localPath))
-                    uiState.attachmentModalError = "No se pudo abrir el video.";
+                    uiState.attachmentModalError =
+                        attachment.kind == AttachmentKind::Image
+                            ? "No se pudo abrir la imagen."
+                            : "No se pudo abrir el video.";
             }
             ImGui::SameLine();
         }
@@ -453,21 +562,26 @@ void RenderAuthenticatedUi(ChatClient& client,
     ImGui::SetWindowFontScale(0.76f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1));
     const std::vector<LogEntry> logs = state.SnapshotLogs();
+    int visibleLineIndex = 0;
     for (const auto& entry : logs) {
+        const std::string lineId = "##copy_line_" + std::to_string(visibleLineIndex++);
         if (entry.isSystem) {
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1), "%s", entry.text.c_str());
+            RenderCopyableLine(lineId, entry.text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
             continue;
         }
 
         const bool isMe = (entry.user == currentIdentity);
+        const ImVec4 lineColor = isMe ? palette.bbsMagenta : palette.bbsLime;
         if (entry.isAttachment) {
-            if (RenderAttachmentLine(entry, isMe, palette))
+            const std::string attachmentLine =
+                "<" + entry.user + "> [" + AttachmentKindToLabel(entry.attachment.kind) + "] " +
+                entry.attachment.displayName + " (" + FormatAttachmentSize(entry.attachment.sizeBytes) + ")";
+            if (RenderCopyableLine(lineId, attachmentLine, lineColor) && ImGui::IsMouseDoubleClicked(0))
                 HandleAttachmentClick(client, state, uiState, entry.attachment);
             continue;
         }
 
-        const ImColor color = isMe ? ImColor(palette.bbsMagenta) : ImColor(palette.bbsLime);
-        ImGui::TextColored(color, "<%s> %s", entry.user.c_str(), entry.text.c_str());
+        RenderCopyableLine(lineId, "<" + entry.user + "> " + entry.text, lineColor);
     }
     if (uiState.autoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0f) ImGui::SetScrollHereY(1.0f);
     ImGui::PopStyleVar();
@@ -487,17 +601,23 @@ void RenderAuthenticatedUi(ChatClient& client,
     const float attachButtonWidth = 84.0f;
     ImGui::SetNextItemWidth(-attachButtonWidth - 20.0f);
     if (!ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere(0);
-    if (ImGui::InputText("##CMD", uiState.input, 512, ImGuiInputTextFlags_EnterReturnsTrue)) {
+    if (ImGui::InputText(
+            "##CMD",
+            uiState.input,
+            512,
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
+            CommandInputCallback)) {
         if (uiState.input[0] != '\0') {
             ProcessLocalCommand(client, state, currentIdentity, uiState.input);
             std::memset(uiState.input, 0, sizeof(uiState.input));
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Attach", ImVec2(attachButtonWidth, 0))) HandleAttachButton(client, state);
+    if (ImGui::Button("Attach", ImVec2(attachButtonWidth, 0))) HandleAttachButton(uiState);
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 
+    RenderAttachPickerModal(client, state, uiState);
     RenderAttachmentModal(client, state, uiState);
 }
 
