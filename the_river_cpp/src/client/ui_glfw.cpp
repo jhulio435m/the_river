@@ -1,9 +1,7 @@
 #include <cstdio>
 #include <chrono>
-#include <fstream>
 #include <string>
 #include <thread>
-#include <vector>
 
 #include <GLFW/glfw3.h>
 
@@ -12,6 +10,7 @@
 #include "imgui_src/imgui.h"
 
 #include "client/app_ui.h"
+#include "client/platform_runtime.h"
 
 namespace {
 
@@ -26,27 +25,6 @@ void RequestWindowAttention(GLFWwindow* window) {
 #else
     (void)window;
 #endif
-}
-
-bool FileExists(const std::string& path) {
-    std::ifstream input(path, std::ios::binary);
-    return input.good();
-}
-
-std::string FindLinuxFontPath() {
-    const std::vector<std::string> candidates{
-        "imgui_src/misc/fonts/Cousine-Regular.ttf",
-        "imgui_src/misc/fonts/DroidSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf"
-    };
-    for (const std::string& candidate : candidates) {
-        if (FileExists(candidate)) return candidate;
-    }
-    return "";
 }
 
 float DetectUiScale(GLFWwindow* window) {
@@ -79,7 +57,7 @@ void ConfigureLinuxUi(GLFWwindow* window) {
     const float uiScale = DetectUiScale(window);
     ImGui::GetStyle().ScaleAllSizes(uiScale);
 
-    const std::string fontPath = FindLinuxFontPath();
+    const std::string fontPath = FindPreferredMonospaceFont(RuntimePlatform::LinuxDesktop);
     if (!fontPath.empty()) {
         io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f * uiScale, nullptr, io.Fonts->GetGlyphRangesDefault());
     }

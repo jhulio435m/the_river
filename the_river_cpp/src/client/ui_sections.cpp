@@ -18,6 +18,27 @@
 
 namespace {
 
+constexpr float kCompactLayoutWidth = 720.0f;
+
+bool IsCompactLayout(float width) {
+    return width < kCompactLayoutWidth;
+}
+
+float HeaderHeightForWidth(float width) {
+    return IsCompactLayout(width) ? 56.0f : 42.0f;
+}
+
+float FooterHeightForWidth(float width) {
+    (void)width;
+    return 42.0f;
+}
+
+float ClampPanelWidth(float width, float desiredWidth) {
+    const float maxWidth = width - 32.0f;
+    if (maxWidth < 280.0f) return width;
+    return desiredWidth < maxWidth ? desiredWidth : maxWidth;
+}
+
 int CommandInputCallback(ImGuiInputTextCallbackData* data) {
 #ifndef _WIN32
     const bool pasteRequested =
@@ -88,14 +109,18 @@ void RenderConnectionScreen(ChatState& state,
                             const UiPalette& palette) {
     const std::string statusDetail = state.StatusDetail();
     const float t = static_cast<float>(ImGui::GetTime());
+    const bool compactLayout = IsCompactLayout(width);
     ImGui::SetCursorPos(ImVec2(0, 0));
     ImGui::BeginChild("##IntroAnim", ImVec2(width, height), false,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
 
-    for (int y = 0; y < static_cast<int>(height); y += 24) {
-        for (int x = 0; x < static_cast<int>(width); x += 32) {
+    const int yStep = compactLayout ? 32 : 24;
+    const int xStep = compactLayout ? 44 : 32;
+    const float noiseThreshold = compactLayout ? 0.48f : 0.35f;
+    for (int y = 0; y < static_cast<int>(height); y += yStep) {
+        for (int x = 0; x < static_cast<int>(width); x += xStep) {
             const float noise = std::sin(x * 0.05f + t * 2.5f) * std::cos(y * 0.05f - t * 1.8f);
-            if (noise > 0.35f) {
+            if (noise > noiseThreshold) {
                 ImGui::SetCursorPos(ImVec2(static_cast<float>(x), static_cast<float>(y)));
                 const ImVec4 blockCol =
                     (std::sin(t * 12.0f + x) > 0) ? ImVec4(0.8f, 0.0f, 0.0f, 0.35f) : ImVec4(0.0f, 0.8f, 0.4f, 0.35f);
@@ -105,8 +130,9 @@ void RenderConnectionScreen(ChatState& state,
     }
     ImGui::EndChild();
 
-    ImGui::SetCursorPos(ImVec2(width * 0.5f - 250.0f, height * 0.5f - 70.0f));
-    ImGui::BeginChild("##ConnectingPanel", ImVec2(500, 160), true);
+    const float panelWidth = ClampPanelWidth(width, 500.0f);
+    ImGui::SetCursorPos(ImVec2((width - panelWidth) * 0.5f, height * 0.5f - 70.0f));
+    ImGui::BeginChild("##ConnectingPanel", ImVec2(panelWidth, 160), true);
     ImGui::TextColored(palette.bbsLime, "UPLINK STATUS: %s", UiStatusLabel(connState));
     ImGui::Separator();
     ImGui::TextWrapped("%s", statusDetail.c_str());
@@ -123,9 +149,12 @@ void RenderCredentialChangeScreen(ChatClient& client,
     const std::string statusDetail = state.StatusDetail();
     const std::string lastError = state.LastError();
     const bool credentialPending = state.IsCredentialChangePending();
+    const bool compactLayout = IsCompactLayout(width);
+    const float panelWidth = ClampPanelWidth(width, 500.0f);
+    const float buttonHeight = compactLayout ? 48.0f : 42.0f;
 
-    ImGui::SetCursorPos(ImVec2(width * 0.5f - 250.0f, height * 0.5f - 180.0f));
-    ImGui::BeginChild("##FirstLoginPanel", ImVec2(500, 360), true);
+    ImGui::SetCursorPos(ImVec2((width - panelWidth) * 0.5f, height * 0.5f - 180.0f));
+    ImGui::BeginChild("##FirstLoginPanel", ImVec2(panelWidth, 360), true);
     ImGui::TextColored(palette.bbsMagenta, "PRIMER ACCESO // CAMBIO OBLIGATORIO");
     ImGui::Separator();
     ImGui::Spacing();
@@ -149,7 +178,7 @@ void RenderCredentialChangeScreen(ChatClient& client,
     const bool canSubmitCredentialChange = !newUser.empty() && !newPass.empty() && !credentialPending;
 
     if (!canSubmitCredentialChange) ImGui::BeginDisabled();
-    if (ImGui::Button("ACTUALIZAR CREDENCIALES", ImVec2(-1, 42))) submitCredentialChange = true;
+    if (ImGui::Button("ACTUALIZAR CREDENCIALES", ImVec2(-1, buttonHeight))) submitCredentialChange = true;
     if (!canSubmitCredentialChange) ImGui::EndDisabled();
 
     if (submitCredentialChange && canSubmitCredentialChange) client.SendFirstLoginChange(newUser, newPass);
@@ -170,9 +199,12 @@ void RenderLoginScreen(ChatClient& client,
     const std::string statusDetail = state.StatusDetail();
     const std::string lastError = state.LastError();
     const bool authPending = state.IsAuthActionPending();
+    const bool compactLayout = IsCompactLayout(width);
+    const float panelWidth = ClampPanelWidth(width, 440.0f);
+    const float buttonHeight = compactLayout ? 48.0f : 40.0f;
 
-    ImGui::SetCursorPos(ImVec2(width * 0.5f - 220.0f, height * 0.5f - 150.0f));
-    ImGui::BeginChild("##AccessPanel", ImVec2(440, 300), true);
+    ImGui::SetCursorPos(ImVec2((width - panelWidth) * 0.5f, height * 0.5f - 150.0f));
+    ImGui::BeginChild("##AccessPanel", ImVec2(panelWidth, 300), true);
     ImGui::TextColored(palette.bbsMagenta, "CHARON SUITE // ACCESS TERMINAL");
     ImGui::Separator();
     ImGui::Spacing();
@@ -194,7 +226,7 @@ void RenderLoginScreen(ChatClient& client,
     const bool canSubmit = !user.empty() && !pass.empty() && !authPending;
 
     if (!canSubmit) ImGui::BeginDisabled();
-    if (ImGui::Button("ESTABLISH UPLINK", ImVec2(-1, 40))) submitLogin = true;
+    if (ImGui::Button("ESTABLISH UPLINK", ImVec2(-1, buttonHeight))) submitLogin = true;
     if (!canSubmit) ImGui::EndDisabled();
 
     if (submitLogin && canSubmit) client.SendLogin(user, pass);
@@ -482,9 +514,21 @@ ImVec4 UiStatusColor(ConnState state) {
 }
 
 void RenderHeaderBar(const ChatState& state, float width, const UiPalette& palette) {
-    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(width, 42), ImColor(palette.bbsBlue));
+    const bool compactLayout = IsCompactLayout(width);
+    const float headerHeight = HeaderHeightForWidth(width);
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(width, headerHeight), ImColor(palette.bbsBlue));
     ImGui::SetCursorPos(ImVec2(10, 6));
     ImGui::Text("Active Users %d <SECURE UPLINK>", state.ActiveUserCount());
+
+    if (compactLayout) {
+        ImGui::SetCursorPos(ImVec2(10, 28));
+        ImGui::TextColored(ImVec4(1, 1, 0, 1), "[%s]", UiStatusLabel(state.GetConnectionState()));
+        if (width > 360.0f) {
+            ImGui::SetCursorPos(ImVec2(width - 170.0f, 28));
+            ImGui::TextDisabled("termux/mobile layout");
+        }
+        return;
+    }
 
     ImGui::SetCursorPos(ImVec2(width - 320, 2));
     ImGui::TextDisabled("MBmon for MBSE BBS version 0.37.6");
@@ -527,25 +571,59 @@ void RenderAuthenticatedUi(ChatClient& client,
                            float height,
                            const UiPalette& palette) {
     const std::string currentIdentity = state.CurrentIdentity();
-
-    ImGui::SetCursorPos(ImVec2(0, 42));
-    ImGui::BeginChild("##Nodes", ImVec2(width * 0.18f, height - 84), false);
-    ImGui::Spacing();
+    const bool compactLayout = IsCompactLayout(width);
+    const float headerHeight = HeaderHeightForWidth(width);
+    const float footerHeight = FooterHeightForWidth(width);
+    const float inputBandHeight = compactLayout ? 96.0f : 84.0f;
+    const float inputTop = height - footerHeight - inputBandHeight;
+    float feedTop = headerHeight;
     const std::vector<std::string> activeUsers = state.SnapshotActiveUsers();
-    for (const auto& user : activeUsers) {
-        const bool isMe = (user == currentIdentity);
-        ImGui::TextColored(isMe ? palette.bbsMagenta : palette.bbsLime, " %s", user.c_str());
+
+    if (compactLayout) {
+        ImGui::SetCursorPos(ImVec2(8, headerHeight + 6));
+        if (ImGui::Button(uiState.usersPanelOpen ? "Hide Users" : "Show Users", ImVec2(120, 34))) {
+            uiState.usersPanelOpen = !uiState.usersPanelOpen;
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(UiStatusColor(state.GetConnectionState()), "[%s]", UiStatusLabel(state.GetConnectionState()));
+        feedTop += 46.0f;
+
+        if (uiState.usersPanelOpen) {
+            ImGui::SetCursorPos(ImVec2(8, feedTop));
+            ImGui::BeginChild("##CompactUsers", ImVec2(width - 16.0f, 84.0f), true);
+            for (std::size_t index = 0; index < activeUsers.size(); ++index) {
+                const std::string& user = activeUsers[index];
+                const bool isMe = (user == currentIdentity);
+                ImGui::TextColored(isMe ? palette.bbsMagenta : palette.bbsLime, "%s", user.c_str());
+                if (index + 1 < activeUsers.size()) ImGui::SameLine();
+            }
+            ImGui::EndChild();
+            feedTop += 92.0f;
+        }
     }
-    ImGui::EndChild();
 
-    ImGui::GetWindowDrawList()->AddLine(
-        ImVec2(width * 0.18f, 42),
-        ImVec2(width * 0.18f, height - 126),
-        ImColor(palette.bbsWhite),
-        2.0f);
+    if (!compactLayout) {
+        ImGui::SetCursorPos(ImVec2(0, headerHeight));
+        ImGui::BeginChild("##Nodes", ImVec2(width * 0.18f, inputTop - headerHeight), false);
+        ImGui::Spacing();
+        for (const auto& user : activeUsers) {
+            const bool isMe = (user == currentIdentity);
+            ImGui::TextColored(isMe ? palette.bbsMagenta : palette.bbsLime, " %s", user.c_str());
+        }
+        ImGui::EndChild();
 
-    ImGui::SetCursorPos(ImVec2(width * 0.18f + 5, 42));
-    ImGui::BeginChild("##Feed", ImVec2(width * 0.82f - 5, height - 168), false);
+        ImGui::GetWindowDrawList()->AddLine(
+            ImVec2(width * 0.18f, headerHeight),
+            ImVec2(width * 0.18f, inputTop),
+            ImColor(palette.bbsWhite),
+            2.0f);
+
+        ImGui::SetCursorPos(ImVec2(width * 0.18f + 5, headerHeight));
+        ImGui::BeginChild("##Feed", ImVec2(width * 0.82f - 5, inputTop - headerHeight), false);
+    } else {
+        ImGui::SetCursorPos(ImVec2(8, feedTop));
+        ImGui::BeginChild("##Feed", ImVec2(width - 16.0f, inputTop - feedTop), false);
+    }
     ImGui::SetWindowFontScale(0.76f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1));
     const std::vector<LogEntry> logs = state.SnapshotLogs();
@@ -566,7 +644,8 @@ void RenderAuthenticatedUi(ChatClient& client,
                 const std::string attachmentLine =
                     "<" + entry.user + "> [" + AttachmentKindToLabel(entry.attachment.kind) + "] " +
                     entry.attachment.displayName + " (" + FormatAttachmentSize(entry.attachment.sizeBytes) + ")";
-                if (RenderCopyableLine(lineId, attachmentLine, lineColor) && ImGui::IsMouseDoubleClicked(0))
+                const bool clicked = RenderCopyableLine(lineId, attachmentLine, lineColor);
+                if (clicked && (compactLayout || ImGui::IsMouseDoubleClicked(0)))
                     HandleAttachmentClick(client, state, uiState, entry.attachment);
                 continue;
             }
@@ -579,17 +658,18 @@ void RenderAuthenticatedUi(ChatClient& client,
     ImGui::SetWindowFontScale(1.0f);
     ImGui::EndChild();
 
-    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, height - 126), ImVec2(width, height - 84), ImColor(palette.bbsBlue));
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, inputTop), ImVec2(width, height - footerHeight), ImColor(palette.bbsBlue));
 
-    ImGui::SetCursorPos(ImVec2(10, height - 74));
+    ImGui::SetCursorPos(ImVec2(10, inputTop + 6));
     ImGui::TextColored(palette.bbsMagenta, "%s", currentIdentity.c_str());
     ImGui::SameLine(0, 0);
     ImGui::TextColored(palette.bbsLime, "-->");
     ImGui::SameLine();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, compactLayout ? ImVec2(4, 8) : ImVec2(0, 0));
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-    const float attachButtonWidth = 84.0f;
+    const float attachButtonWidth = compactLayout ? 110.0f : 84.0f;
+    ImGui::SetCursorPos(ImVec2(10, inputTop + (compactLayout ? 30.0f : 22.0f)));
     ImGui::SetNextItemWidth(-attachButtonWidth - 20.0f);
     if (!ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere(0);
     if (ImGui::InputText(
@@ -613,7 +693,9 @@ void RenderAuthenticatedUi(ChatClient& client,
 }
 
 void RenderFooterBar(float width, float height) {
-    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, height - 42), ImVec2(width, height), ImColor(0.0f, 0.0f, 0.66f, 1.0f));
+    const bool compactLayout = IsCompactLayout(width);
+    const float footerHeight = FooterHeightForWidth(width);
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, height - footerHeight), ImVec2(width, height), ImColor(0.0f, 0.0f, 0.66f, 1.0f));
 
     std::time_t now = std::time(nullptr);
     char hms[16];
@@ -624,16 +706,24 @@ void RenderFooterBar(float width, float height) {
     std::strftime(dt, sizeof(dt), "%a %b %d", std::localtime(&now));
 
     const std::string fullFooter =
-        std::string(hms) + " " + yr + " TZUTC 0200 " + dt + " " + hms + " " + yr + " UTC 0200";
+        compactLayout
+            ? std::string(dt) + " " + hms
+            : std::string(hms) + " " + yr + " TZUTC 0200 " + dt + " " + hms + " " + yr + " UTC 0200";
     const float footerTextWidth = ImGui::CalcTextSize(fullFooter.c_str()).x;
     ImGui::SetCursorPos(ImVec2((width - footerTextWidth) * 0.5f, height - 32));
 
     const ImVec4 cyanPale = ImVec4(0.6f, 1.0f, 1.0f, 1.0f);
     const ImVec4 yellowPale = ImVec4(0.9f, 1.0f, 0.6f, 1.0f);
 
-    ImGui::TextColored(cyanPale, "%s %s TZUTC 0200", hms, yr);
-    ImGui::SameLine();
-    ImGui::TextColored(yellowPale, " %s ", dt);
-    ImGui::SameLine();
-    ImGui::TextColored(cyanPale, "%s %s UTC 0200", hms, yr);
+    if (compactLayout) {
+        ImGui::TextColored(yellowPale, "%s", dt);
+        ImGui::SameLine();
+        ImGui::TextColored(cyanPale, " %s", hms);
+    } else {
+        ImGui::TextColored(cyanPale, "%s %s TZUTC 0200", hms, yr);
+        ImGui::SameLine();
+        ImGui::TextColored(yellowPale, " %s ", dt);
+        ImGui::SameLine();
+        ImGui::TextColored(cyanPale, "%s %s UTC 0200", hms, yr);
+    }
 }

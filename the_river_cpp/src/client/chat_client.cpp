@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "client/attachment_utils.h"
+#include "client/platform_runtime.h"
 #include "common/base64.h"
 #include "common/security_utils.h"
 #include "common/shared_config.h"
@@ -613,8 +614,14 @@ void ChatClient::NetworkLoop() {
         if (!IsSocketValid(sock)) {
             AppendClientLog("NetworkLoop ConnectViaTor failed");
             state_.SetConnectionState(ConnState::DISCONNECTED);
-            state_.SetStatusDetail("No se pudo abrir un circuito onion hacia el servidor.");
-            state_.SetLastError("Tor no disponible o hidden service sin respuesta.");
+            if (IsTermuxEnvironment() && !IsTorProxyReachable(river::kTorProxyIp, river::kTorProxyPort)) {
+                state_.SetStatusDetail("No se detecto un proxy Tor local en 127.0.0.1:9050.");
+                state_.SetLastError(
+                    "En Termux debes iniciar tor antes del cliente. Ejecuta el script run_termux_client.sh con --start-tor o arranca tor manualmente.");
+            } else {
+                state_.SetStatusDetail("No se pudo abrir un circuito onion hacia el servidor.");
+                state_.SetLastError("Tor no disponible o hidden service sin respuesta.");
+            }
             for (int i = 0; i < 50 && !stopRequested_.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;

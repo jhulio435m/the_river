@@ -123,7 +123,7 @@ bool PrepareTorBootstrap(const std::string& torExe) {
 pid_t g_torPid = 0;
 #endif
 
-bool IsProxyListening(const std::string& ip, int port) {
+bool ProbeProxyListening(const std::string& ip, int port) {
     SocketHandle s = socket(AF_INET, SOCK_STREAM, 0);
     if (!IsSocketValid(s)) return false;
 
@@ -145,8 +145,12 @@ bool IsProxyListening(const std::string& ip, int port) {
 
 }
 
+bool IsTorProxyReachable(const std::string& ip, int port) {
+    return ProbeProxyListening(ip, port);
+}
+
 bool EnsureLocalTorIsRunning() {
-    if (IsProxyListening("127.0.0.1", 9050)) {
+    if (ProbeProxyListening("127.0.0.1", 9050)) {
         AppendTorLog("Tor proxy already active on 9050.");
         return true;
     }

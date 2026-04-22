@@ -12,6 +12,7 @@ struct ClientUiState {
     char newPass[32] = "";
     char attachPath[1024] = "";
     bool autoScroll = true;
+    bool usersPanelOpen = false;
     bool attachPickerOpen = false;
     std::string attachPickerError;
     bool attachmentModalOpen = false;
