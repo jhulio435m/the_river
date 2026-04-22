@@ -220,32 +220,19 @@ bool RenderAttachmentLine(const LogEntry& entry, bool isMe, const UiPalette& pal
 }
 
 bool RenderCopyableLine(const std::string& id, const std::string& text, const ImVec4& color) {
-    std::vector<char> copyBuffer(text.begin(), text.end());
-    copyBuffer.push_back('\0');
+    const ImVec4 hoverColor(color.x * 0.18f, color.y * 0.18f, color.z * 0.18f, 0.60f);
+    const ImVec4 activeColor(color.x * 0.28f, color.y * 0.28f, color.z * 0.28f, 0.85f);
+    const std::string label = text + "##" + id;
 
-    const ImVec2 startCursor = ImGui::GetCursorPos();
-    ImGui::TextColored(color, "%s", text.c_str());
-    const ImVec2 endCursor = ImGui::GetCursorPos();
-
-    ImGui::SetCursorPos(startCursor);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(0.22f, 0.42f, 0.95f, 0.35f));
-    ImGui::PushItemWidth(-1.0f);
-    ImGui::InputText(
-        id.c_str(),
-        copyBuffer.data(),
-        copyBuffer.size(),
-        ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
-    ImGui::PopItemWidth();
-    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PushStyleColor(ImGuiCol_Text, color);
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, hoverColor);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, activeColor);
+    const bool clicked = ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
     ImGui::PopStyleColor(4);
-    ImGui::PopStyleVar(2);
-    ImGui::SetCursorPos(endCursor);
-    return hovered;
+
+    if (clicked) ImGui::SetClipboardText(text.c_str());
+    return clicked;
 }
 
 void HandleAttachButton(ClientUiState& uiState) {
@@ -562,26 +549,30 @@ void RenderAuthenticatedUi(ChatClient& client,
     ImGui::SetWindowFontScale(0.76f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1));
     const std::vector<LogEntry> logs = state.SnapshotLogs();
-    int visibleLineIndex = 0;
-    for (const auto& entry : logs) {
-        const std::string lineId = "##copy_line_" + std::to_string(visibleLineIndex++);
-        if (entry.isSystem) {
-            RenderCopyableLine(lineId, entry.text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
-            continue;
-        }
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(logs.size()));
+    while (clipper.Step()) {
+        for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+            const LogEntry& entry = logs[index];
+            const std::string lineId = "copy_line_" + std::to_string(index);
+            if (entry.isSystem) {
+                RenderCopyableLine(lineId, entry.text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                continue;
+            }
 
-        const bool isMe = (entry.user == currentIdentity);
-        const ImVec4 lineColor = isMe ? palette.bbsMagenta : palette.bbsLime;
-        if (entry.isAttachment) {
-            const std::string attachmentLine =
-                "<" + entry.user + "> [" + AttachmentKindToLabel(entry.attachment.kind) + "] " +
-                entry.attachment.displayName + " (" + FormatAttachmentSize(entry.attachment.sizeBytes) + ")";
-            if (RenderCopyableLine(lineId, attachmentLine, lineColor) && ImGui::IsMouseDoubleClicked(0))
-                HandleAttachmentClick(client, state, uiState, entry.attachment);
-            continue;
-        }
+            const bool isMe = (entry.user == currentIdentity);
+            const ImVec4 lineColor = isMe ? palette.bbsMagenta : palette.bbsLime;
+            if (entry.isAttachment) {
+                const std::string attachmentLine =
+                    "<" + entry.user + "> [" + AttachmentKindToLabel(entry.attachment.kind) + "] " +
+                    entry.attachment.displayName + " (" + FormatAttachmentSize(entry.attachment.sizeBytes) + ")";
+                if (RenderCopyableLine(lineId, attachmentLine, lineColor) && ImGui::IsMouseDoubleClicked(0))
+                    HandleAttachmentClick(client, state, uiState, entry.attachment);
+                continue;
+            }
 
-        RenderCopyableLine(lineId, "<" + entry.user + "> " + entry.text, lineColor);
+            RenderCopyableLine(lineId, "<" + entry.user + "> " + entry.text, lineColor);
+        }
     }
     if (uiState.autoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0f) ImGui::SetScrollHereY(1.0f);
     ImGui::PopStyleVar();

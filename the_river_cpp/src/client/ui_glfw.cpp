@@ -1,6 +1,8 @@
 #include <cstdio>
+#include <chrono>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <GLFW/glfw3.h>
@@ -12,6 +14,11 @@
 #include "client/app_ui.h"
 
 namespace {
+
+using FrameClock = std::chrono::steady_clock;
+
+constexpr auto kFocusedFrameBudget = std::chrono::milliseconds(16);
+constexpr auto kBackgroundFrameBudget = std::chrono::milliseconds(66);
 
 void RequestWindowAttention(GLFWwindow* window) {
 #if defined(GLFW_VERSION_MAJOR) && (GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 3))
@@ -54,6 +61,19 @@ float DetectUiScale(GLFWwindow* window) {
     return scale < 1.0f ? 1.0f : scale;
 }
 
+bool IsWindowFocused(GLFWwindow* window) {
+    return glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
+}
+
+bool IsWindowMinimized(GLFWwindow* window) {
+    return glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+}
+
+void PaceFrame(FrameClock::time_point frameStart, bool lowPowerMode) {
+    const auto frameBudget = lowPowerMode ? kBackgroundFrameBudget : kFocusedFrameBudget;
+    std::this_thread::sleep_until(frameStart + frameBudget);
+}
+
 void ConfigureLinuxUi(GLFWwindow* window) {
     ImGuiIO& io = ImGui::GetIO();
     const float uiScale = DetectUiScale(window);
@@ -77,6 +97,7 @@ int main() {
     }
 
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -93,7 +114,16 @@ int main() {
 
     double lastTitleUpdate = 0.0;
     while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
+        const FrameClock::time_point frameStart = FrameClock::now();
+        const bool focused = IsWindowFocused(window);
+        if (focused) {
+            glfwPollEvents();
+        } else {
+            glfwWaitEventsTimeout(0.05);
+        }
+        if (glfwWindowShouldClose(window)) break;
+        if (IsWindowMinimized(window)) continue;
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -117,6 +147,7 @@ int main() {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
+        PaceFrame(frameStart, !focused);
     }
 
     client.Stop();

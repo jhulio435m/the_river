@@ -7,7 +7,9 @@
 #include <windows.h>
 #include <GL/GL.h>
 
+#include <chrono>
 #include <cstdio>
+#include <thread>
 
 #include "imgui_src/backends/imgui_impl_opengl3.h"
 #include "imgui_src/backends/imgui_impl_win32.h"
@@ -20,6 +22,13 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 namespace {
 
+using FrameClock = std::chrono::steady_clock;
+
+using PFNWGLSWAPINTERVALEXTPROC = BOOL(WINAPI*)(int interval);
+
+constexpr auto kFocusedFrameBudget = std::chrono::milliseconds(16);
+constexpr auto kBackgroundFrameBudget = std::chrono::milliseconds(66);
+
 struct WGLWindowData {
     HDC hdc = nullptr;
 };
@@ -28,6 +37,7 @@ HGLRC g_hRC = nullptr;
 WGLWindowData g_mainWindow;
 int g_width = 960;
 int g_height = 620;
+PFNWGLSWAPINTERVALEXTPROC g_wglSwapIntervalEXT = nullptr;
 
 void RequestWindowAttention(HWND hwnd) {
     FLASHWINFO info{};
@@ -36,6 +46,19 @@ void RequestWindowAttention(HWND hwnd) {
     info.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
     info.uCount = 2;
     FlashWindowEx(&info);
+}
+
+void EnableVSync() {
+    if (!g_wglSwapIntervalEXT) {
+        g_wglSwapIntervalEXT =
+            reinterpret_cast<PFNWGLSWAPINTERVALEXTPROC>(wglGetProcAddress("wglSwapIntervalEXT"));
+    }
+    if (g_wglSwapIntervalEXT) g_wglSwapIntervalEXT(1);
+}
+
+void PaceFrame(FrameClock::time_point frameStart, bool lowPowerMode) {
+    const auto frameBudget = lowPowerMode ? kBackgroundFrameBudget : kFocusedFrameBudget;
+    std::this_thread::sleep_until(frameStart + frameBudget);
 }
 
 bool CreateDeviceWGL(HWND hwnd, WGLWindowData* data) {
@@ -113,6 +136,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         return 1;
     }
     wglMakeCurrent(g_mainWindow.hdc, g_hRC);
+    EnableVSync();
 
     ::ShowWindow(hwnd, SW_SHOWDEFAULT);
     ::UpdateWindow(hwnd);
@@ -143,6 +167,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     double lastTitleUpdate = 0.0;
     bool done = false;
     while (!done) {
+        const FrameClock::time_point frameStart = FrameClock::now();
         MSG msg;
         while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             ::TranslateMessage(&msg);
@@ -150,8 +175,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             if (msg.message == WM_QUIT) done = true;
         }
         if (done) break;
+        const bool lowPowerMode = ::GetForegroundWindow() != hwnd;
         if (::IsIconic(hwnd)) {
-            ::Sleep(10);
+            ::WaitMessage();
             continue;
         }
 
@@ -175,6 +201,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         ::SwapBuffers(g_mainWindow.hdc);
+        PaceFrame(frameStart, lowPowerMode);
     }
 
     client.Stop();
