@@ -8,7 +8,7 @@ echo ">>> Actualizando indices..."
 pkg update -y
 
 echo ">>> Instalando toolchain y runtime base..."
-pkg install -y clang pkg-config make git glfw mesa dbus termux-api tor
+pkg install -y clang pkg-config make git glfw mesa mesa-dev libglvnd-dev dbus termux-api tor
 
 echo ">>> Instalando companion package de Termux:X11..."
 pkg install -y termux-x11-nightly
