@@ -2,16 +2,52 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <limits.h>
 #include <map>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace river {
 namespace {
 
+std::string ExecutableDir() {
+#ifdef _WIN32
+    char path[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return "";
+    std::string fullPath(path, len);
+#else
+    char path[PATH_MAX] = {0};
+    ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len <= 0) return "";
+    std::string fullPath(path, static_cast<std::size_t>(len));
+#endif
+    const std::size_t sep = fullPath.find_last_of("/\\");
+    if (sep == std::string::npos) return "";
+    return fullPath.substr(0, sep);
+}
+
+bool OpenFirstExisting(std::ifstream& input, const std::string& executableDir) {
+    input.open("tor_data/runtime.env");
+    if (input.is_open()) return true;
+    input.open(".env.local");
+    if (input.is_open()) return true;
+    if (executableDir.empty()) return false;
+
+    input.open(executableDir + "/tor_data/runtime.env");
+    if (input.is_open()) return true;
+    input.open(executableDir + "/.env.local");
+    return input.is_open();
+}
+
 std::map<std::string, std::string> LoadRuntimeEnvFile() {
     std::map<std::string, std::string> values;
-    std::ifstream input("tor_data/runtime.env");
-    if (!input.is_open()) input.open(".env.local");
-    if (!input.is_open()) return values;
+    std::ifstream input;
+    if (!OpenFirstExisting(input, ExecutableDir())) return values;
 
     std::string line;
     while (std::getline(input, line)) {
