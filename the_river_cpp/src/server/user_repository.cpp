@@ -44,8 +44,9 @@ bool UserRepository::EnsureDefaultAdminLocked() {
         "INSERT OR IGNORE INTO users (username, password_hash, first_login, hwid, is_admin) "
         "VALUES (?, ?, 0, NULL, 1);",
         -1, &st, nullptr);
-    std::string adminHash = HashPassword(river::kAdminDefaultPassword);
-    sqlite3_bind_text(st, 1, river::kAdminUsername, -1, SQLITE_TRANSIENT);
+    std::string adminHash = HashPassword(river::AdminDefaultPassword());
+    const std::string adminUsername = river::AdminUsername();
+    sqlite3_bind_text(st, 1, adminUsername.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 2, adminHash.c_str(), -1, SQLITE_TRANSIENT);
     bool ok = sqlite3_step(st) == SQLITE_DONE;
     sqlite3_finalize(st);
@@ -198,7 +199,7 @@ bool UserRepository::CreateNextUser(std::string& createdUsername) {
 
     createdUsername = NextSequentialUsernameLocked();
     sqlite3_stmt* st = nullptr;
-    std::string passwordHash = HashPassword(river::kDefaultUserPassword);
+    std::string passwordHash = HashPassword(river::DefaultUserPassword());
     sqlite3_prepare_v2(
         db_,
         "INSERT INTO users (username, password_hash, first_login, hwid, is_admin) "

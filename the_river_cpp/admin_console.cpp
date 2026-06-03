@@ -2,6 +2,13 @@
 #include <string>
 #include <thread>
 
+#ifdef _WIN32
+#include <conio.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#endif
+
 #include "common/security_utils.h"
 #include "common/shared_config.h"
 #include "common/tor_connection.h"
@@ -12,6 +19,42 @@ namespace {
 void SendLine(SocketHandle sock, const std::string& msg) {
     std::string full = msg + "\n";
     send(sock, full.c_str(), (int)full.size(), 0);
+}
+
+std::string ReadSecretLine() {
+#ifdef _WIN32
+    std::string value;
+    while (true) {
+        int c = _getch();
+        if (c == '\r' || c == '\n') {
+            std::cout << std::endl;
+            break;
+        }
+        if ((c == '\b' || c == 127) && !value.empty()) {
+            value.pop_back();
+            continue;
+        }
+        if (c >= 32) value.push_back(static_cast<char>(c));
+    }
+    return value;
+#else
+    termios oldTerm{};
+    termios newTerm{};
+    if (tcgetattr(STDIN_FILENO, &oldTerm) != 0) {
+        std::string fallback;
+        std::getline(std::cin, fallback);
+        return fallback;
+    }
+
+    newTerm = oldTerm;
+    newTerm.c_lflag &= static_cast<unsigned int>(~ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newTerm);
+    std::string value;
+    std::getline(std::cin, value);
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldTerm);
+    std::cout << std::endl;
+    return value;
+#endif
 }
 
 void ReceiverLoop(SocketHandle sock) {
@@ -43,13 +86,13 @@ void ReceiverLoop(SocketHandle sock) {
                 size_t sep = rest.find(':');
                 std::string from = sep == std::string::npos ? rest : rest.substr(0, sep);
                 std::string enc = sep == std::string::npos ? "" : rest.substr(sep + 1);
-                std::string dec = AESHelper::Decrypt(enc, river::kAesKey, "");
+                std::string dec = AESHelper::Decrypt(enc, river::EncryptionKey(), "");
                 std::cout << "\r\033[K[PM de " << from << "]: " << dec << "\nADMIN> " << std::flush;
             } else if (line.find("SYSTEM") == std::string::npos && line.find(':') != std::string::npos) {
                 size_t sep = line.find(':');
                 std::string user = line.substr(0, sep);
                 std::string enc = line.substr(sep + 1);
-                std::string dec = AESHelper::Decrypt(enc, river::kAesKey, "");
+                std::string dec = AESHelper::Decrypt(enc, river::EncryptionKey(), "");
                 
                 // Fallback si no es encriptado
                 if (dec.find("[DECRYPT_ERR]") != std::string::npos) dec = enc;
@@ -73,18 +116,22 @@ int main() {
 #endif
 
     std::cout << "--- THE RIVER | ADMIN CONSOLE ---" << std::endl;
+    if (!river::HasRequiredClientConfig()) {
+        std::cerr << "[!] Faltan THE_RIVER_ONION y/o THE_RIVER_AES_KEY." << std::endl;
+        return 1;
+    }
 
     std::string adminUser;
     std::string adminPass;
     std::cout << "ADMIN IDENT : ";
     std::getline(std::cin, adminUser);
     std::cout << "ADMIN KEY   : ";
-    std::getline(std::cin, adminPass);
+    adminPass = ReadSecretLine();
 
     TorEndpoint endpoint{
         river::kTorProxyIp,
         river::kTorProxyPort,
-        river::kOnionAddress,
+        river::OnionAddress(),
         (unsigned short)river::kTorOnionPort
     };
 
@@ -109,7 +156,7 @@ int main() {
             continue;
         }
 
-        std::string enc = AESHelper::Encrypt(input, river::kAesKey, "");
+        std::string enc = AESHelper::Encrypt(input, river::EncryptionKey(), "");
         SendLine(adminSocket, adminUser + ":" + enc);
         std::cout << "ADMIN> ";
     }

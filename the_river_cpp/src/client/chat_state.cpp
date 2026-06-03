@@ -133,7 +133,7 @@ void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::str
         std::string user = msg.substr(0, sep);
         std::string payload = msg.substr(sep + 1);
 
-        std::string dec = AESHelper::Decrypt(payload, river::kAesKey, "");
+        std::string dec = AESHelper::Decrypt(payload, river::EncryptionKey(), "");
         if (dec.find("[DECRYPT_ERR]") != std::string::npos) dec = payload;
 
         PushLogLocked({timestamp, user, dec, false, isPm});

@@ -119,7 +119,7 @@ int ChatClient::SendRawLine(const std::string& payload) {
 }
 
 bool ChatClient::SendEncryptedPayload(const std::string& user, const std::string& payload) {
-    const std::string enc = AESHelper::Encrypt(payload, river::kAesKey, "");
+    const std::string enc = AESHelper::Encrypt(payload, river::EncryptionKey(), "");
     return SendRawLine(user + ":" + enc + "\n") >= 0;
 }
 
@@ -180,7 +180,7 @@ bool ChatClient::SendChatMessage(const std::string& user, const std::string& inp
 }
 
 bool ChatClient::SendPrivateMessage(const std::string& fromUser, const std::string& target, const std::string& message) {
-    std::string enc = AESHelper::Encrypt(message, river::kAesKey, "");
+    std::string enc = AESHelper::Encrypt(message, river::EncryptionKey(), "");
     if (SendRawLine("[PM]:" + target + ":" + fromUser + ":" + enc + "\n") < 0) {
         state_.SetLastError("No se pudo enviar el mensaje privado.");
         return false;
@@ -216,7 +216,7 @@ bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDra
             river::base64::EncodeString(attachment.displayName) + "|" +
             river::base64::EncodeString(attachment.mimeType) + "|" +
             std::to_string(attachment.sizeBytes),
-        river::kAesKey,
+        river::EncryptionKey(),
         "");
 
     if (SendRawLine("[ATTACH]:" + encOffer + "\n") < 0) {
@@ -266,7 +266,7 @@ bool ChatClient::HandleAttachmentBroadcast(const std::string& line) {
 
     const std::string sender = rest.substr(0, sep);
     const std::string encPayload = rest.substr(sep + 1);
-    const std::string payload = AESHelper::Decrypt(encPayload, river::kAesKey, "");
+    const std::string payload = AESHelper::Decrypt(encPayload, river::EncryptionKey(), "");
     if (payload.find("[DECRYPT_ERR]") != std::string::npos || payload.rfind("@offer|", 0) != 0) return true;
 
     const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
@@ -577,7 +577,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
                 if (sep != std::string::npos) {
                     const std::string sender = rest.substr(0, sep);
                     const std::string encPayload = rest.substr(sep + 1);
-                    const std::string dec = AESHelper::Decrypt(encPayload, river::kAesKey, "");
+                    const std::string dec = AESHelper::Decrypt(encPayload, river::EncryptionKey(), "");
                     if (dec.find("[DECRYPT_ERR]") == std::string::npos && HandleAttachmentPrivateControl(sender, dec))
                         continue;
                 }
@@ -596,6 +596,15 @@ void ChatClient::NetworkLoop() {
     while (!stopRequested_.load()) {
         CloseCurrentSocket();
         bool hadIdentity = !CurrentUser().empty();
+        if (!river::HasRequiredClientConfig()) {
+            state_.SetConnectionState(ConnState::DISCONNECTED);
+            state_.SetAuthenticated(false);
+            state_.SetStatusDetail("Configura THE_RIVER_ONION y THE_RIVER_AES_KEY antes de conectar.");
+            state_.SetLastError("Falta configuracion privada local. No se usaran claves empotradas en la build.");
+            AppendClientLog("NetworkLoop missing private config");
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+        }
         state_.SetConnectionState(hadIdentity ? ConnState::RECONNECTING : ConnState::CONNECTING);
         state_.SetAuthenticated(false);
         state_.SetMustChangeCredentials(false);
@@ -607,7 +616,7 @@ void ChatClient::NetworkLoop() {
         TorEndpoint endpoint{
             river::kTorProxyIp,
             river::kTorProxyPort,
-            river::kOnionAddress,
+            river::OnionAddress(),
             static_cast<unsigned short>(river::kTorOnionPort)
         };
         SocketHandle sock = ConnectViaTor(endpoint);

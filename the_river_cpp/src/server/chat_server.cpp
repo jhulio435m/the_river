@@ -45,7 +45,7 @@ void ChatServer::LogEncryptedMessage(const std::string& user, const std::string&
     std::time_t now = std::time(nullptr);
     std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
     std::string entry = std::string(ts) + "|" + user + ":" + encryptedPayload;
-    f << AESHelper::Encrypt(entry, river::kAesKey, "") << "\n";
+    f << AESHelper::Encrypt(entry, river::EncryptionKey(), "") << "\n";
 }
 
 void ChatServer::Broadcast(const std::string& msg) {
@@ -189,10 +189,10 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
         return;
     }
 
-    if (parts[0] == "/newuser") {
+        if (parts[0] == "/newuser") {
         std::string username;
         if (repo_.CreateNextUser(username))
-            SendLine(clientSocket, "SYSTEM: NUEVO USUARIO: " + username + " / clave inicial: " + river::kDefaultUserPassword);
+            SendLine(clientSocket, "SYSTEM: NUEVO USUARIO: " + username + " / clave inicial definida por THE_RIVER_NEW_USER_PASSWORD");
         else
             SendLine(clientSocket, "SYSTEM: ERROR creando usuario.");
         return;
@@ -251,7 +251,7 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
             SendLine(clientSocket, "SYSTEM: Uso: /kick <user>");
             return;
         }
-        if (parts[1] == river::kAdminUsername) {
+        if (parts[1] == river::AdminUsername()) {
             SendLine(clientSocket, "SYSTEM: No se puede expulsar al admin.");
             return;
         }
@@ -398,7 +398,7 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 size_t sep = raw.find(':');
                 if (sep != std::string::npos) payload = raw.substr(sep + 1);
 
-                std::string dec = AESHelper::Decrypt(payload, river::kAesKey, "");
+                std::string dec = AESHelper::Decrypt(payload, river::EncryptionKey(), "");
                 if (StartsWith(dec, "/")) {
                     ClientSession currentClient;
                     {
@@ -437,6 +437,12 @@ int ChatServer::Run() {
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
 
+    if (!river::HasRequiredServerConfig()) {
+        std::cerr << "[CFG] Faltan variables obligatorias: THE_RIVER_AES_KEY, "
+                  << "THE_RIVER_ADMIN_BOOTSTRAP_PASSWORD y THE_RIVER_NEW_USER_PASSWORD." << std::endl;
+        return 1;
+    }
+
     if (!repo_.Open(dbPath_)) {
         std::cerr << "[DB] No se pudo abrir " << dbPath_ << std::endl;
         return 1;
@@ -454,13 +460,17 @@ int ChatServer::Run() {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    const std::string bindAddress = river::BindAddress();
+    if (inet_pton(AF_INET, bindAddress.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "[NET] THE_RIVER_BIND_ADDR invalido: " << bindAddress << std::endl;
+        return 1;
+    }
     addr.sin_port = htons(river::kServerPort);
 
     int opt = 1;
     setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
     if (bind(serverSocket, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        std::cerr << "[NET] No se pudo hacer bind en el puerto " << river::kServerPort << std::endl;
+        std::cerr << "[NET] No se pudo hacer bind en " << bindAddress << ":" << river::kServerPort << std::endl;
         return 1;
     }
     if (listen(serverSocket, 20) != 0) {
@@ -468,9 +478,9 @@ int ChatServer::Run() {
         return 1;
     }
 
-    std::cout << ">>> THE RIVER SECURE SERVER ONLINE — PORT " << river::kServerPort << " <<<" << std::endl;
-    std::cout << "[CFG] Admin predefinido: " << river::kAdminUsername << std::endl;
-    std::cout << "[CFG] Nuevo usuario por /newuser con clave inicial: " << river::kDefaultUserPassword << std::endl;
+    std::cout << ">>> THE RIVER SECURE SERVER ONLINE — " << bindAddress << ":" << river::kServerPort << " <<<" << std::endl;
+    std::cout << "[CFG] Admin predefinido: " << river::AdminUsername() << std::endl;
+    std::cout << "[CFG] Nuevo usuario por /newuser con clave inicial desde THE_RIVER_NEW_USER_PASSWORD." << std::endl;
     std::cout << "[HB]  Heartbeat cada 30s, timeout 90s." << std::endl;
 
     std::thread(&ChatServer::HeartbeatLoop, this).detach();

@@ -9,7 +9,7 @@ echo ">>> COMPILANDO THE RIVER SUITE (LINUX)..."
 CC_BIN="${CC:-gcc}"
 CXX_BIN="${CXX:-g++}"
 
-COMMON_SRC="src/common/security_utils.cpp src/common/tor_connection.cpp src/common/base64.cpp src/aes.cpp"
+COMMON_SRC="src/common/security_utils.cpp src/common/shared_config.cpp src/common/tor_connection.cpp src/common/base64.cpp src/aes.cpp"
 SERVER_SRC="src/server/user_repository.cpp src/server/chat_server.cpp server.cpp"
 ADMIN_SRC="admin_console.cpp"
 RUNTIME_SRC="src/client/platform_runtime.cpp"

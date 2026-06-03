@@ -379,20 +379,13 @@ void OpenAttachmentModal(ChatClient& client,
                          ChatState& state,
                          ClientUiState& uiState,
                          const AttachmentPayload& attachment) {
+    (void)client;
     uiState.attachmentModalOpen = true;
     uiState.attachmentModalOwner = attachment.ownerUser;
     uiState.attachmentModalId = attachment.id;
     uiState.attachmentModalError.clear();
-    uiState.attachmentModalLoading = attachment.localPath.empty() && attachment.ownerUser != state.CurrentIdentity();
+    uiState.attachmentModalLoading = false;
     ReleaseImagePreviewTexture(uiState.attachmentPreviewTexture);
-
-    if (attachment.localPath.empty() && attachment.ownerUser != state.CurrentIdentity()) {
-        const std::string previewPath = BuildAttachmentCachePath(attachment.id, attachment.displayName);
-        if (!client.RequestAttachment(attachment, previewPath, "preview")) {
-            uiState.attachmentModalLoading = false;
-            uiState.attachmentModalError = state.LastError();
-        }
-    }
 }
 
 void HandleAttachmentClick(ChatClient& client,
@@ -425,11 +418,15 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
         ImGui::Text("Size : %s", FormatAttachmentSize(attachment.sizeBytes).c_str());
         ImGui::Spacing();
 
-        uiState.attachmentModalLoading = attachment.localPath.empty();
+        const bool isRemoteAttachment = attachment.localPath.empty() && attachment.ownerUser != state.CurrentIdentity();
+        uiState.attachmentModalLoading =
+            isRemoteAttachment && attachment.state == AttachmentTransferState::Requested;
         if (uiState.attachmentModalLoading) {
             ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.4f, 1.0f), "Receiving attachment...");
         } else if (!uiState.attachmentModalError.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.32f, 1.0f), "%s", uiState.attachmentModalError.c_str());
+        } else if (isRemoteAttachment) {
+            ImGui::TextWrapped("Attachment metadata received. Download only when you choose Preview or Save As.");
         } else if (attachment.kind == AttachmentKind::Image) {
             std::string previewError;
             if (EnsureImagePreviewTexture(attachment.localPath, uiState.attachmentPreviewTexture, previewError)) {
@@ -453,6 +450,16 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
         }
 
         ImGui::Spacing();
+        if (isRemoteAttachment && attachment.kind != AttachmentKind::File) {
+            if (ImGui::Button("Preview", ImVec2(110, 0))) {
+                const std::string previewPath = BuildAttachmentCachePath(attachment.id, attachment.displayName);
+                if (!client.RequestAttachment(attachment, previewPath, "preview"))
+                    uiState.attachmentModalError = state.LastError().empty()
+                        ? "No se pudo solicitar la previsualizacion."
+                        : state.LastError();
+            }
+            ImGui::SameLine();
+        }
         if (attachment.kind != AttachmentKind::File && !attachment.localPath.empty()) {
             if (ImGui::Button("Open", ImVec2(110, 0))) {
                 if (!OpenPathWithShell(attachment.localPath))
@@ -474,6 +481,9 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
                     uiState.attachmentModalError = saveError;
                 }
             }
+            ImGui::SameLine();
+        } else if (isRemoteAttachment) {
+            if (ImGui::Button("Save As...", ImVec2(110, 0))) SaveAttachmentAs(client, state, attachment);
             ImGui::SameLine();
         }
         if (ImGui::Button("Close", ImVec2(110, 0))) keepOpen = false;
