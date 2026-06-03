@@ -1,13 +1,46 @@
 #include "common/shared_config.h"
 
 #include <cstdlib>
+#include <fstream>
+#include <map>
 
 namespace river {
 namespace {
 
+std::map<std::string, std::string> LoadRuntimeEnvFile() {
+    std::map<std::string, std::string> values;
+    std::ifstream input("tor_data/runtime.env");
+    if (!input.is_open()) input.open(".env.local");
+    if (!input.is_open()) return values;
+
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::size_t sep = line.find('=');
+        if (sep == std::string::npos) continue;
+
+        std::string key = line.substr(0, sep);
+        std::string value = line.substr(sep + 1);
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\''))) {
+            value = value.substr(1, value.size() - 2);
+        }
+        values[key] = value;
+    }
+    return values;
+}
+
+std::string FileOrDefault(const char* name, const char* fallback) {
+    static const std::map<std::string, std::string> fileValues = LoadRuntimeEnvFile();
+    auto it = fileValues.find(name);
+    if (it == fileValues.end() || it->second.empty()) return fallback;
+    return it->second;
+}
+
 std::string EnvOrDefault(const char* name, const char* fallback) {
     const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') return fallback;
+    if (value == nullptr || value[0] == '\0') return FileOrDefault(name, fallback);
     return value;
 }
 
