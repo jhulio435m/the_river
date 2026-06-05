@@ -22,6 +22,7 @@ public:
     bool InitSchema();
 
     UserRecord FindUserByCredentials(const std::string& username, const std::string& password);
+    UserRecord FindUserByUsername(const std::string& username);
     bool UpdateUserHwid(const std::string& username, const std::string& hwid);
     bool IsHwidBanned(const std::string& hwid);
     bool BanHwid(const std::string& hwid, const std::string& reason);
@@ -31,6 +32,8 @@ public:
     bool CompleteFirstLogin(const std::string& oldUsername,
                             const std::string& newUsername,
                             const std::string& newPassword);
+    bool UserExists(const std::string& username);
+    bool GetPasswordHash(const std::string& username, std::string& passwordHash);
 
 private:
     bool ExecSQLLocked(const std::string& sql);

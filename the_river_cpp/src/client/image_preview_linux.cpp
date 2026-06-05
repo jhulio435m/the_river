@@ -20,8 +20,8 @@ bool EnsureImagePreviewTexture(const std::string& path, ImagePreviewTexture& tex
     stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
     if (!pixels) {
         const char* failure = stbi_failure_reason();
-        error = failure ? std::string("No se pudo decodificar la imagen: ") + failure
-                        : "No se pudo decodificar la imagen para la vista previa.";
+        error = failure ? std::string("Could not decode image: ") + failure
+                        : "Could not decode the image preview.";
         return false;
     }
 

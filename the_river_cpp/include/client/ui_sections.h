@@ -18,7 +18,7 @@ struct UiPalette {
 const char* UiStatusLabel(ConnState state);
 ImVec4 UiStatusColor(ConnState state);
 
-void RenderHeaderBar(const ChatState& state, float width, const UiPalette& palette);
+void RenderHeaderBar(ChatState& state, ClientUiState& uiState, float width, const UiPalette& palette);
 void RenderUnauthenticatedUi(ChatClient& client,
                              ChatState& state,
                              ClientUiState& uiState,

@@ -8,11 +8,16 @@
 #include <thread>
 #include <vector>
 
+#include "common/base64.h"
+#include "common/secure_envelope.h"
 #include "common/security_utils.h"
 #include "common/shared_config.h"
-#include "include/aes.h"
 
 namespace {
+
+constexpr std::size_t kMaxLineBytes = 65536;
+constexpr std::size_t kMaxChatPayloadBytes = 8192;
+constexpr std::size_t kMaxAttachmentControlBytes = 16384;
 
 bool StartsWith(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
@@ -24,6 +29,16 @@ std::vector<std::string> SplitWhitespace(const std::string& input) {
     std::string part;
     while (ss >> part) parts.push_back(part);
     return parts;
+}
+
+std::string ChallengeSpecFromPasswordHash(const std::string& storedHash) {
+    if (storedHash.rfind("pbkdf2-sha256$", 0) != 0) return "";
+    std::vector<std::string> parts;
+    std::stringstream ss(storedHash);
+    std::string part;
+    while (std::getline(ss, part, '$')) parts.push_back(part);
+    if (parts.size() != 4) return "";
+    return parts[0] + "$" + parts[1] + "$" + parts[2];
 }
 
 }
@@ -45,7 +60,22 @@ void ChatServer::LogEncryptedMessage(const std::string& user, const std::string&
     std::time_t now = std::time(nullptr);
     std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
     std::string entry = std::string(ts) + "|" + user + ":" + encryptedPayload;
-    f << AESHelper::Encrypt(entry, river::EncryptionKey(), "") << "\n";
+    f << river::SealPayload(entry) << "\n";
+}
+
+void ChatServer::LogRuntime(const std::string& category, const std::string& message) {
+    std::lock_guard<std::mutex> lk(logMutex_);
+    char ts[32];
+    std::time_t now = std::time(nullptr);
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    
+    std::string entry = "[" + category + "] " + message;
+    std::cout << entry << std::endl;
+
+    std::ofstream f("server_runtime.log", std::ios::app);
+    if (f.is_open()) {
+        f << ts << " " << entry << "\n";
+    }
 }
 
 void ChatServer::Broadcast(const std::string& msg) {
@@ -83,6 +113,16 @@ bool ChatServer::SendPrivateMessage(const std::string& toNick, const std::string
         }
     }
     return false;
+}
+
+void ChatServer::AuditAdminAction(const std::string& admin, const std::string& action, const std::string& detail) {
+    std::lock_guard<std::mutex> lk(logMutex_);
+    std::ofstream f("admin_audit.log", std::ios::app);
+    if (!f.is_open()) return;
+    char ts[32];
+    std::time_t now = std::time(nullptr);
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    f << ts << "|" << admin << "|" << action << "|" << detail << "\n";
 }
 
 bool ChatServer::KickUser(const std::string& nick, const std::string& reason) {
@@ -167,7 +207,76 @@ ChatServer::LoginResult ChatServer::AuthorizeLogin(const std::string& username,
             if (failures >= 5) {
                 loginLocks_[username] = time(nullptr) + 300;
                 failures = 0;
-                std::cout << "[SEC] Usuario '" << username << "' bloqueado por 5 min." << std::endl;
+            LogRuntime("SEC", "Usuario '" + username + "' bloqueado por 5 min.");
+            }
+        }
+    }
+
+    return result;
+}
+
+ChatServer::LoginResult ChatServer::AuthorizeLoginProof(const std::string& username,
+                                                        const std::string& proof,
+                                                        const std::string& nonce,
+                                                        const std::string& hwid) {
+    {
+        std::lock_guard<std::mutex> lk(attemptsMutex_);
+        const time_t now = time(nullptr);
+        auto userLock = loginLocks_.find(username);
+        if (userLock != loginLocks_.end() && userLock->second > now)
+            return {LoginCode::Blocked, false};
+        auto originLock = loginLocksByOrigin_.find(hwid);
+        if (originLock != loginLocksByOrigin_.end() && originLock->second > now)
+            return {LoginCode::Blocked, false};
+    }
+
+    std::string storedHash;
+    LoginResult result;
+    if (!repo_.GetPasswordHash(username, storedHash)) {
+        result.code = LoginCode::InvalidCredentials;
+    } else if (storedHash.rfind("pbkdf2-sha256$", 0) != 0) {
+        result.code = LoginCode::InvalidCredentials;
+    } else {
+        const std::string expected = HmacSha256Hex(storedHash, nonce + "|" + username + "|" + hwid);
+        if (expected != proof) {
+            result.code = LoginCode::InvalidCredentials;
+        } else {
+            UserRecord record = repo_.FindUserByUsername(username);
+            result.isAdmin = record.isAdmin;
+            if (!record.found) {
+                result.code = LoginCode::InvalidCredentials;
+            } else if (!record.isAdmin && repo_.IsHwidBanned(hwid)) {
+                result.code = LoginCode::Blocked;
+            } else if (!record.isAdmin && !record.hwid.empty() && record.hwid != hwid) {
+                result.code = LoginCode::HwidMismatch;
+            } else {
+                if (!record.isAdmin && record.hwid.empty()) repo_.UpdateUserHwid(username, hwid);
+                result.code = record.firstLogin ? LoginCode::FirstLogin : LoginCode::Ok;
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(attemptsMutex_);
+        if (result.code == LoginCode::Ok || result.code == LoginCode::FirstLogin) {
+            loginFailures_.erase(username);
+            loginLocks_.erase(username);
+            loginFailuresByOrigin_.erase(hwid);
+            loginLocksByOrigin_.erase(hwid);
+        } else if (result.code == LoginCode::InvalidCredentials) {
+            int& userFailures = loginFailures_[username];
+            int& originFailures = loginFailuresByOrigin_[hwid];
+            userFailures++;
+            originFailures++;
+            if (userFailures >= 5) {
+                loginLocks_[username] = time(nullptr) + 300;
+                userFailures = 0;
+            LogRuntime("SEC", "Usuario '" + username + "' bloqueado por 5 min.");
+            }
+            if (originFailures >= 10) {
+                loginLocksByOrigin_[hwid] = time(nullptr) + 300;
+                originFailures = 0;
+                LogRuntime("SEC", "Origen '" + hwid + "' bloqueado por 5 min.");
             }
         }
     }
@@ -184,29 +293,37 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
     if (parts[0] == "/help") {
         SendLine(
             clientSocket,
-            "SYSTEM: /newuser | /passwd <user> <clave> | /banhwid <hwid> [razon] | "
+            "SYSTEM: /newuser | /passwd <user> <new-key> | /banhwid <hwid> [reason] | "
             "/unbanhwid <hwid> | /users | /kick <user>");
         return;
     }
 
-        if (parts[0] == "/newuser") {
+    if (parts[0] == "/newuser") {
         std::string username;
-        if (repo_.CreateNextUser(username))
+        if (repo_.CreateNextUser(username)) {
+            AuditAdminAction(currentClient.nick, "newuser", username);
             SendLine(clientSocket, "SYSTEM: NUEVO USUARIO: " + username + " / clave inicial definida por THE_RIVER_NEW_USER_PASSWORD");
-        else
+        } else {
             SendLine(clientSocket, "SYSTEM: ERROR creando usuario.");
+        }
         return;
     }
 
     if (parts[0] == "/passwd") {
         if (parts.size() < 3) {
-            SendLine(clientSocket, "SYSTEM: Uso: /passwd <user> <clave>");
+            SendLine(clientSocket, "SYSTEM: Uso: /passwd <user> <new-key>");
             return;
         }
-        if (repo_.ResetUserPassword(parts[1], parts[2]))
+        if (!IsValidUsername(parts[1]) || !IsStrongEnoughPassword(parts[2])) {
+            SendLine(clientSocket, "SYSTEM: Usuario o clave no cumple la politica de seguridad.");
+            return;
+        }
+        if (repo_.ResetUserPassword(parts[1], parts[2])) {
+            AuditAdminAction(currentClient.nick, "passwd", parts[1]);
             SendLine(clientSocket, "SYSTEM: Clave actualizada para " + parts[1]);
-        else
+        } else {
             SendLine(clientSocket, "SYSTEM: No se pudo actualizar la clave de " + parts[1]);
+        }
         return;
     }
 
@@ -221,6 +338,7 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
             reason = reasonPos == std::string::npos ? reason : command.substr(reasonPos);
         }
         if (repo_.BanHwid(parts[1], reason)) {
+            AuditAdminAction(currentClient.nick, "banhwid", parts[1] + " " + reason);
             DisconnectByHwid(parts[1], "HWID baneado.");
             SendLine(clientSocket, "SYSTEM: HWID baneado: " + parts[1]);
         } else {
@@ -234,10 +352,12 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
             SendLine(clientSocket, "SYSTEM: Uso: /unbanhwid <hwid>");
             return;
         }
-        if (repo_.UnbanHwid(parts[1]))
+        if (repo_.UnbanHwid(parts[1])) {
+            AuditAdminAction(currentClient.nick, "unbanhwid", parts[1]);
             SendLine(clientSocket, "SYSTEM: HWID desbloqueado: " + parts[1]);
-        else
+        } else {
             SendLine(clientSocket, "SYSTEM: No se pudo desbloquear HWID.");
+        }
         return;
     }
 
@@ -256,6 +376,7 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
             return;
         }
         if (KickUser(parts[1], "Expulsado por admin.")) {
+            AuditAdminAction(currentClient.nick, "kick", parts[1]);
             Broadcast("SYSTEM: [ADMIN] NODE " + parts[1] + " KICKED.");
             BroadcastUsers();
         } else {
@@ -281,7 +402,7 @@ void ChatServer::HeartbeatLoop() {
             }
         }
         for (SocketHandle sock : stale) {
-            std::cout << "[HB] Cliente " << sock << " sin respuesta; cerrando." << std::endl;
+            LogRuntime("HB", "Cliente " + std::to_string(sock) + " sin respuesta; cerrando.");
             CloseSocketHandle(sock);
         }
     }
@@ -295,6 +416,9 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
     bool authed = false;
     bool isAdmin = false;
     bool firstLoginPending = false;
+    std::string pendingLoginUser;
+    std::string pendingLoginHwid;
+    std::string pendingLoginNonce;
 
     SendLine(clientSocket, "SYSTEM: UPLINK ESTABLISHED.");
 
@@ -315,6 +439,10 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
             accum.erase(0, pos + 1);
             raw.erase(std::remove(raw.begin(), raw.end(), '\r'), raw.end());
             if (raw.empty()) continue;
+            if (raw.size() > kMaxLineBytes) {
+                SendLine(clientSocket, "SYSTEM: LINEA DEMASIADO GRANDE.");
+                continue;
+            }
 
             if (authed) {
                 std::lock_guard<std::mutex> lk(clientsMutex_);
@@ -324,17 +452,46 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
 
             if (raw == "PONG") continue;
 
-            if (StartsWith(raw, "[LOGIN]:")) {
-                std::stringstream ss(raw.substr(8));
+            if (StartsWith(raw, "[LOGIN_INIT]:")) {
+                std::stringstream ss(raw.substr(13));
                 std::string user;
-                std::string pass;
                 std::string hwid;
                 std::getline(ss, user, ':');
-                std::getline(ss, pass, ':');
                 std::getline(ss, hwid, ':');
+                if (!IsValidUsername(user) || hwid.empty() || hwid.size() > 128) {
+                    SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
+                    continue;
+                }
+                std::string storedHash;
+                if (!repo_.GetPasswordHash(user, storedHash)) {
+                    SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
+                    continue;
+                }
+                const std::string challengeSpec = ChallengeSpecFromPasswordHash(storedHash);
+                if (challengeSpec.empty()) {
+                    SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
+                    continue;
+                }
+                pendingLoginUser = user;
+                pendingLoginHwid = hwid;
+                pendingLoginNonce = RandomHex(16);
+                SendLine(clientSocket, "AUTH_CHALLENGE:" + pendingLoginNonce + ":" + challengeSpec);
+            } else if (StartsWith(raw, "[LOGIN_PROOF]:")) {
+                std::stringstream ss(raw.substr(14));
+                std::string user;
+                std::string hwid;
+                std::string proof;
+                std::getline(ss, user, ':');
+                std::getline(ss, hwid, ':');
+                std::getline(ss, proof, ':');
+                if (user != pendingLoginUser || hwid != pendingLoginHwid || pendingLoginNonce.empty()) {
+                    SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
+                    continue;
+                }
 
                 currentHwid = hwid;
-                LoginResult login = AuthorizeLogin(user, pass, hwid);
+                LoginResult login = AuthorizeLoginProof(user, proof, pendingLoginNonce, hwid);
+                pendingLoginNonce.clear();
                 isAdmin = login.isAdmin;
 
                 if (login.code == LoginCode::FirstLogin) {
@@ -365,7 +522,11 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 std::string newPass;
                 std::getline(ss, newUser, ':');
                 std::getline(ss, newPass, ':');
-                if (repo_.CompleteFirstLogin(currentNick, newUser, newPass)) {
+                std::string decryptedPass;
+                if (river::OpenPayload(newPass, decryptedPass)) newPass = decryptedPass;
+                if (!IsValidUsername(newUser) || !IsStrongEnoughPassword(newPass)) {
+                    SendLine(clientSocket, "SYSTEM: ERROR ACTUALIZANDO USUARIO.");
+                } else if (repo_.CompleteFirstLogin(currentNick, newUser, newPass)) {
                     currentNick = newUser;
                     authed = true;
                     firstLoginPending = false;
@@ -381,6 +542,10 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                     SendLine(clientSocket, "SYSTEM: ERROR ACTUALIZANDO USUARIO.");
                 }
             } else if (StartsWith(raw, "[ATTACH]:") && authed) {
+                if (raw.size() > kMaxAttachmentControlBytes) {
+                    SendLine(clientSocket, "SYSTEM: ADJUNTO RECHAZADO POR TAMANO.");
+                    continue;
+                }
                 Broadcast("[ATTACH]:" + currentNick + ":" + raw.substr(9));
             } else if (StartsWith(raw, "[PM]:") && authed) {
                 std::string rest = raw.substr(5);
@@ -397,8 +562,13 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 std::string payload = raw;
                 size_t sep = raw.find(':');
                 if (sep != std::string::npos) payload = raw.substr(sep + 1);
+                if (payload.size() > kMaxChatPayloadBytes) {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE DEMASIADO GRANDE.");
+                    continue;
+                }
 
-                std::string dec = AESHelper::Decrypt(payload, river::EncryptionKey(), "");
+                std::string dec;
+                const bool opened = river::OpenPayload(payload, dec);
                 if (StartsWith(dec, "/")) {
                     ClientSession currentClient;
                     {
@@ -406,14 +576,25 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                         currentClient = clients_[clientSocket];
                     }
                     HandleAdminCommand(clientSocket, currentClient, dec);
-                } else {
+                } else if (opened) {
                     LogEncryptedMessage(currentNick, payload);
                     Broadcast(currentNick + ":" + payload);
+                } else {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE RECHAZADO POR AUTENTICACION.");
                 }
             } else if (authed) {
                 std::string payload = raw;
                 size_t sep = raw.find(':');
                 if (sep != std::string::npos) payload = raw.substr(sep + 1);
+                if (payload.size() > kMaxChatPayloadBytes) {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE DEMASIADO GRANDE.");
+                    continue;
+                }
+                std::string plainCheck;
+                if (!river::OpenPayload(payload, plainCheck)) {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE RECHAZADO POR AUTENTICACION.");
+                    continue;
+                }
                 LogEncryptedMessage(currentNick, payload);
                 Broadcast(currentNick + ":" + payload);
             }
@@ -478,10 +659,10 @@ int ChatServer::Run() {
         return 1;
     }
 
-    std::cout << ">>> THE RIVER SECURE SERVER ONLINE — " << bindAddress << ":" << river::kServerPort << " <<<" << std::endl;
-    std::cout << "[CFG] Admin predefinido: " << river::AdminUsername() << std::endl;
-    std::cout << "[CFG] Nuevo usuario por /newuser con clave inicial desde THE_RIVER_NEW_USER_PASSWORD." << std::endl;
-    std::cout << "[HB]  Heartbeat cada 30s, timeout 90s." << std::endl;
+    LogRuntime("SYS", "THE RIVER SECURE SERVER ONLINE — " + bindAddress + ":" + std::to_string(river::kServerPort));
+    LogRuntime("CFG", "Admin predefinido: " + river::AdminUsername());
+    LogRuntime("CFG", "Nuevo usuario por /newuser con clave inicial desde THE_RIVER_NEW_USER_PASSWORD.");
+    LogRuntime("HB",  "Heartbeat cada 30s, timeout 90s.");
 
     std::thread(&ChatServer::HeartbeatLoop, this).detach();
 
@@ -493,7 +674,7 @@ int ChatServer::Run() {
 
         char ip[INET_ADDRSTRLEN] = {0};
         inet_ntop(AF_INET, &clientAddr.sin_addr, ip, sizeof(ip));
-        std::cout << "[CON] Nueva conexion: " << ip << std::endl;
+        LogRuntime("CON", "Nueva conexion: " + std::string(ip));
         std::thread(&ChatServer::HandleClient, this, client).detach();
     }
 

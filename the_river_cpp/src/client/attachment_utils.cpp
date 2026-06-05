@@ -147,17 +147,17 @@ std::string BuildAttachmentCachePath(const std::string& attachmentId, const std:
 bool BuildAttachmentDraftFromPath(const std::string& path, AttachmentDraft& draft, std::string& error) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input.is_open()) {
-        error = "No se pudo abrir el archivo seleccionado.";
+        error = "Could not open the selected file.";
         return false;
     }
 
     const std::streamoff fileSize = input.tellg();
     if (fileSize < 0) {
-        error = "No se pudo determinar el tamano del archivo.";
+        error = "Could not determine the file size.";
         return false;
     }
     if (static_cast<std::size_t>(fileSize) > kMaxAttachmentBytes) {
-        error = "Adjunto demasiado grande. Limite actual: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".";
+        error = "Attachment too large. Current limit: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".";
         return false;
     }
 
@@ -172,13 +172,13 @@ bool BuildAttachmentDraftFromPath(const std::string& path, AttachmentDraft& draf
 bool CopyFileBinary(const std::string& sourcePath, const std::string& destinationPath, std::string& error) {
     std::ifstream input(sourcePath, std::ios::binary);
     if (!input.is_open()) {
-        error = "No se pudo abrir el adjunto fuente.";
+        error = "Could not open the source attachment.";
         return false;
     }
 
     std::ofstream output(destinationPath, std::ios::binary);
     if (!output.is_open()) {
-        error = "No se pudo crear el archivo destino.";
+        error = "Could not create the destination file.";
         return false;
     }
 

@@ -34,7 +34,7 @@ bool EnsureDirectory(const fs::path& directory, std::string& error) {
     std::error_code ec;
     fs::create_directories(directory, ec);
     if (ec) {
-        error = "No se pudo preparar el directorio: " + directory.string();
+        error = "Could not prepare directory: " + directory.string();
         return false;
     }
     return true;
@@ -95,7 +95,7 @@ std::string UniqueFilePath(const fs::path& baseDir, const std::string& fileName)
 bool PickAttachmentFile(AttachmentDraft& draft, std::string& error) {
     if (!CommandExists("termux-storage-get")) {
         error =
-            "No se encontro termux-storage-get. Instala termux-api y usa termux-setup-storage para adjuntar archivos en Termux.";
+            "Could not find termux-storage-get. Install termux-api and run termux-setup-storage to attach files in Termux.";
         return false;
     }
 
@@ -110,13 +110,13 @@ bool PickAttachmentFile(AttachmentDraft& draft, std::string& error) {
 
     const std::string command = "termux-storage-get " + ShellQuote(importDir.string());
     if (std::system(command.c_str()) != 0) {
-        error = "La seleccion de archivo en Termux fue cancelada o fallo.";
+        error = "The Termux file selection was cancelled or failed.";
         return false;
     }
 
     const fs::path importedFile = PickImportedFile(importDir);
     if (importedFile.empty()) {
-        error = "Termux no devolvio ningun archivo despues de la seleccion.";
+        error = "Termux did not return a file after selection.";
         return false;
     }
 

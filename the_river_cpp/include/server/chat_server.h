@@ -47,8 +47,14 @@ private:
     void DisconnectByHwid(const std::string& hwid, const std::string& reason);
     void HandleAdminCommand(SocketHandle clientSocket, const ClientSession& currentClient, const std::string& command);
     void LogEncryptedMessage(const std::string& user, const std::string& encryptedPayload);
+    void LogRuntime(const std::string& category, const std::string& message);
     std::string BuildUsersSnapshot();
     LoginResult AuthorizeLogin(const std::string& username, const std::string& password, const std::string& hwid);
+    LoginResult AuthorizeLoginProof(const std::string& username,
+                                    const std::string& proof,
+                                    const std::string& nonce,
+                                    const std::string& hwid);
+    void AuditAdminAction(const std::string& admin, const std::string& action, const std::string& detail);
 
     std::string dbPath_;
     std::string logPath_;
@@ -57,6 +63,8 @@ private:
     std::map<SocketHandle, ClientSession> clients_;
     std::map<std::string, time_t> loginLocks_;
     std::map<std::string, int> loginFailures_;
+    std::map<std::string, int> loginFailuresByOrigin_;
+    std::map<std::string, time_t> loginLocksByOrigin_;
     std::mutex clientsMutex_;
     std::mutex attemptsMutex_;
     std::mutex logMutex_;

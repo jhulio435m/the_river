@@ -9,7 +9,7 @@ bool PickAttachmentFile(AttachmentDraft& draft, std::string& error) {
 bool PickAttachmentSavePath(const AttachmentPayload& attachment, std::string& savePath, std::string& error) {
     (void)attachment;
     (void)savePath;
-    error = "Guardar adjuntos desde la UI solo esta implementado en Windows por ahora.";
+    error = "Saving attachments from the UI is only implemented on Windows for now.";
     return false;
 }
 

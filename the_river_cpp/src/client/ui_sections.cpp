@@ -20,6 +20,10 @@ namespace {
 
 constexpr float kCompactLayoutWidth = 720.0f;
 
+const char* Tr(const ClientUiState& uiState, const char* english, const char* spanish) {
+    return uiState.spanishUi ? spanish : english;
+}
+
 bool IsCompactLayout(float width) {
     return width < kCompactLayoutWidth;
 }
@@ -102,7 +106,23 @@ void DrawErrorBanner(const std::string& error) {
     ImGui::PopStyleColor();
 }
 
+const char* UiStatusLabelForLanguage(ConnState state, bool spanish) {
+    if (!spanish) return UiStatusLabel(state);
+    switch (state) {
+        case ConnState::DISCONNECTED: return "SIN CONEXION";
+        case ConnState::CONNECTING: return "NEGOCIANDO TOR";
+        case ConnState::TOR_READY: return "TOR LISTO";
+        case ConnState::AUTHENTICATING: return "AUTENTICANDO";
+        case ConnState::FIRST_LOGIN_REQUIRED: return "PRIMER ACCESO";
+        case ConnState::UPDATING_CREDENTIALS: return "ACTUALIZANDO";
+        case ConnState::RECONNECTING: return "RECONECTANDO";
+        case ConnState::AUTHENTICATED: return "SEGURO";
+    }
+    return "DESCONOCIDO";
+}
+
 void RenderConnectionScreen(ChatState& state,
+                            const ClientUiState& uiState,
                             float width,
                             float height,
                             ConnState connState,
@@ -133,7 +153,9 @@ void RenderConnectionScreen(ChatState& state,
     const float panelWidth = ClampPanelWidth(width, 500.0f);
     ImGui::SetCursorPos(ImVec2((width - panelWidth) * 0.5f, height * 0.5f - 70.0f));
     ImGui::BeginChild("##ConnectingPanel", ImVec2(panelWidth, 160), true);
-    ImGui::TextColored(palette.bbsLime, "UPLINK STATUS: %s", UiStatusLabel(connState));
+    ImGui::TextColored(palette.bbsLime, "%s: %s",
+                       Tr(uiState, "UPLINK STATUS", "ESTADO DEL ENLACE"),
+                       UiStatusLabelForLanguage(connState, uiState.spanishUi));
     ImGui::Separator();
     ImGui::TextWrapped("%s", statusDetail.c_str());
     ImGui::EndChild();
@@ -155,18 +177,22 @@ void RenderCredentialChangeScreen(ChatClient& client,
 
     ImGui::SetCursorPos(ImVec2((width - panelWidth) * 0.5f, height * 0.5f - 180.0f));
     ImGui::BeginChild("##FirstLoginPanel", ImVec2(panelWidth, 360), true);
-    ImGui::TextColored(palette.bbsMagenta, "PRIMER ACCESO // CAMBIO OBLIGATORIO");
+    ImGui::TextColored(palette.bbsMagenta, "%s",
+                       Tr(uiState, "FIRST ACCESS // REQUIRED UPDATE", "PRIMER ACCESO // CAMBIO OBLIGATORIO"));
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextWrapped("Debes definir un nuevo identificador y una nueva clave antes de entrar al chat.");
+    ImGui::TextWrapped("%s",
+                       Tr(uiState,
+                          "Set a new identifier and key before entering the chat.",
+                          "Debes definir un nuevo identificador y una nueva clave antes de entrar al chat."));
     ImGui::Spacing();
 
     bool submitCredentialChange = false;
     bool focusNewPass = false;
-    ImGui::Text("NEW IDENT:");
+    ImGui::Text("%s", Tr(uiState, "NEW IDENT:", "NUEVO ID :"));
     ImGui::SameLine();
     focusNewPass = ImGui::InputText("##NEW_ID", uiState.newUser, 32, ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::Text("NEW KEY :");
+    ImGui::Text("%s", Tr(uiState, "NEW KEY  :", "NUEVA CLAVE:"));
     ImGui::SameLine();
     if (focusNewPass) ImGui::SetKeyboardFocusHere();
     submitCredentialChange |= ImGui::InputText("##NEW_PW", uiState.newPass, 32,
@@ -178,13 +204,13 @@ void RenderCredentialChangeScreen(ChatClient& client,
     const bool canSubmitCredentialChange = !newUser.empty() && !newPass.empty() && !credentialPending;
 
     if (!canSubmitCredentialChange) ImGui::BeginDisabled();
-    if (ImGui::Button("ACTUALIZAR CREDENCIALES", ImVec2(-1, buttonHeight))) submitCredentialChange = true;
+    if (ImGui::Button(Tr(uiState, "UPDATE CREDENTIALS", "ACTUALIZAR CREDENCIALES"), ImVec2(-1, buttonHeight))) submitCredentialChange = true;
     if (!canSubmitCredentialChange) ImGui::EndDisabled();
 
     if (submitCredentialChange && canSubmitCredentialChange) client.SendFirstLoginChange(newUser, newPass);
 
     ImGui::Spacing();
-    DrawInfoBand("UPLINK STATUS", statusDetail, UiStatusColor(connState));
+    DrawInfoBand(Tr(uiState, "UPLINK STATUS", "ESTADO DEL ENLACE"), statusDetail, UiStatusColor(connState));
     DrawErrorBanner(lastError);
     ImGui::EndChild();
 }
@@ -205,16 +231,17 @@ void RenderLoginScreen(ChatClient& client,
 
     ImGui::SetCursorPos(ImVec2((width - panelWidth) * 0.5f, height * 0.5f - 150.0f));
     ImGui::BeginChild("##AccessPanel", ImVec2(panelWidth, 300), true);
-    ImGui::TextColored(palette.bbsMagenta, "CHARON SUITE // ACCESS TERMINAL");
+    ImGui::TextColored(palette.bbsMagenta, "%s",
+                       Tr(uiState, "CHARON SUITE // ACCESS TERMINAL", "CHARON SUITE // TERMINAL DE ACCESO"));
     ImGui::Separator();
     ImGui::Spacing();
 
     bool submitLogin = false;
     bool focusLoginPass = false;
-    ImGui::Text("IDENT:");
+    ImGui::Text("%s", Tr(uiState, "IDENT:", "ID   :"));
     ImGui::SameLine();
     focusLoginPass = ImGui::InputText("##ID", uiState.user, 32, ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::Text("KEY  :");
+    ImGui::Text("%s", Tr(uiState, "KEY  :", "CLAVE:"));
     ImGui::SameLine();
     if (focusLoginPass) ImGui::SetKeyboardFocusHere();
     submitLogin |= ImGui::InputText("##PW", uiState.pass, 32,
@@ -226,13 +253,13 @@ void RenderLoginScreen(ChatClient& client,
     const bool canSubmit = !user.empty() && !pass.empty() && !authPending;
 
     if (!canSubmit) ImGui::BeginDisabled();
-    if (ImGui::Button("ESTABLISH UPLINK", ImVec2(-1, buttonHeight))) submitLogin = true;
+    if (ImGui::Button(Tr(uiState, "ESTABLISH UPLINK", "ESTABLECER ENLACE"), ImVec2(-1, buttonHeight))) submitLogin = true;
     if (!canSubmit) ImGui::EndDisabled();
 
     if (submitLogin && canSubmit) client.SendLogin(user, pass);
 
     ImGui::Spacing();
-    DrawInfoBand("UPLINK STATUS", statusDetail, UiStatusColor(connState));
+    DrawInfoBand(Tr(uiState, "UPLINK STATUS", "ESTADO DEL ENLACE"), statusDetail, UiStatusColor(connState));
     DrawErrorBanner(lastError);
     ImGui::EndChild();
 }
@@ -263,13 +290,41 @@ bool RenderCopyableLine(const std::string& id, const std::string& text, const Im
     const bool clicked = ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
     ImGui::PopStyleColor(4);
 
-    if (clicked) ImGui::SetClipboardText(text.c_str());
+    if (ImGui::BeginPopupContextItem((id + "_menu").c_str())) {
+        if (ImGui::Selectable("Copy")) ImGui::SetClipboardText(text.c_str());
+        ImGui::EndPopup();
+    }
     return clicked;
 }
 
-void HandleAttachButton(ClientUiState& uiState) {
-    uiState.attachPickerOpen = true;
+void HandleAttachButton(ChatClient& client, ChatState& state, ClientUiState& uiState) {
     uiState.attachPickerError.clear();
+    AttachmentDraft draft;
+    std::string pickerError;
+    if (!PickAttachmentFile(draft, pickerError)) {
+        if (!pickerError.empty()) {
+            uiState.attachPickerError = pickerError;
+            uiState.attachPickerOpen = true;
+        }
+        return;
+    }
+
+    const std::string currentIdentity = state.CurrentIdentity();
+    if (currentIdentity.empty()) {
+        uiState.attachPickerError = Tr(uiState,
+                                       "No authenticated identity is available for attachments.",
+                                       "No hay identidad autenticada para adjuntar archivos.");
+        uiState.attachPickerOpen = true;
+        return;
+    }
+    if (!client.SendAttachment(currentIdentity, draft)) {
+        uiState.attachPickerError = state.LastError().empty()
+            ? Tr(uiState,
+                 "The selected attachment could not be sent.",
+                 "No se pudo enviar el adjunto seleccionado.")
+            : state.LastError();
+        uiState.attachPickerOpen = true;
+    }
 }
 
 void ResetAttachPicker(ClientUiState& uiState) {
@@ -279,68 +334,18 @@ void ResetAttachPicker(ClientUiState& uiState) {
 }
 
 void RenderAttachPickerModal(ChatClient& client, ChatState& state, ClientUiState& uiState) {
+    (void)client;
+    (void)state;
     if (!uiState.attachPickerOpen) return;
 
     if (!ImGui::IsPopupOpen("##AttachPicker")) ImGui::OpenPopup("##AttachPicker");
     bool keepOpen = true;
     if (ImGui::BeginPopupModal("##AttachPicker", &keepOpen, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Adjuntar archivo local");
+        ImGui::Text("%s", Tr(uiState, "Attachment unavailable", "Adjunto no disponible"));
         ImGui::Separator();
-        ImGui::TextWrapped("En Linux este flujo evita depender por completo del dialogo externo y reduce fallos de sesion en Debian.");
+        ImGui::TextWrapped("%s", uiState.attachPickerError.c_str());
         ImGui::Spacing();
-        ImGui::SetNextItemWidth(520.0f);
-        const bool submitPath = ImGui::InputText(
-            "##ATTACH_PATH",
-            uiState.attachPath,
-            IM_ARRAYSIZE(uiState.attachPath),
-            ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::SameLine();
-        if (ImGui::Button("Browse...", ImVec2(110, 0))) {
-            AttachmentDraft draft;
-            std::string pickerError;
-            if (PickAttachmentFile(draft, pickerError)) {
-                std::strncpy(uiState.attachPath, draft.localPath.c_str(), sizeof(uiState.attachPath) - 1);
-                uiState.attachPath[sizeof(uiState.attachPath) - 1] = '\0';
-                uiState.attachPickerError.clear();
-            } else if (!pickerError.empty()) {
-                uiState.attachPickerError = pickerError;
-            }
-        }
-
-        if (!uiState.attachPickerError.empty()) {
-            ImGui::Spacing();
-            ImGui::TextWrapped("%s", uiState.attachPickerError.c_str());
-        }
-
-        ImGui::Spacing();
-        bool shouldAttach = submitPath;
-        if (ImGui::Button("Attach", ImVec2(110, 0))) shouldAttach = true;
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(110, 0))) keepOpen = false;
-
-        if (shouldAttach) {
-            const std::string attachPath = TrimCopy(uiState.attachPath);
-            if (attachPath.empty()) {
-                uiState.attachPickerError = "Debes indicar una ruta de archivo.";
-            } else {
-                AttachmentDraft draft;
-                std::string buildError;
-                if (!BuildAttachmentDraftFromPath(attachPath, draft, buildError)) {
-                    uiState.attachPickerError = buildError;
-                } else {
-                    const std::string currentIdentity = state.CurrentIdentity();
-                    if (currentIdentity.empty()) {
-                        uiState.attachPickerError = "No hay identidad autenticada para adjuntar archivos.";
-                    } else if (!client.SendAttachment(currentIdentity, draft)) {
-                        uiState.attachPickerError = state.LastError().empty()
-                            ? "No se pudo enviar el adjunto seleccionado."
-                            : state.LastError();
-                    } else {
-                        keepOpen = false;
-                    }
-                }
-            }
-        }
+        if (ImGui::Button(Tr(uiState, "OK", "Aceptar"), ImVec2(110, 0))) keepOpen = false;
 
         ImGui::EndPopup();
     }
@@ -360,7 +365,7 @@ void ResetAttachmentModal(ClientUiState& uiState) {
 void SaveAttachmentAs(ChatClient& client, ChatState& state, const AttachmentPayload& attachment) {
     if (!attachment.localPath.empty()) {
         if (!OpenPathWithShell(attachment.localPath))
-            state.AddSystemLog("SYSTEM: No se pudo abrir el archivo local.");
+            state.AddSystemLog("SYSTEM: Could not open the local file.");
         return;
     }
 
@@ -372,7 +377,7 @@ void SaveAttachmentAs(ChatClient& client, ChatState& state, const AttachmentPayl
     }
 
     if (!client.RequestAttachment(attachment, savePath, "save"))
-        state.AddSystemLog("SYSTEM: No se pudo solicitar el adjunto.");
+        state.AddSystemLog("SYSTEM: Could not request the attachment.");
 }
 
 void OpenAttachmentModal(ChatClient& client,
@@ -413,20 +418,24 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
     if (ImGui::BeginPopupModal("##AttachmentPreview", &keepOpen, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("[%s] %s", AttachmentKindToLabel(attachment.kind).c_str(), attachment.displayName.c_str());
         ImGui::Separator();
-        ImGui::Text("Owner: %s", attachment.ownerUser.c_str());
-        ImGui::Text("Type : %s", attachment.mimeType.c_str());
-        ImGui::Text("Size : %s", FormatAttachmentSize(attachment.sizeBytes).c_str());
+        ImGui::Text("%s: %s", Tr(uiState, "Owner", "Dueno"), attachment.ownerUser.c_str());
+        ImGui::Text("%s : %s", Tr(uiState, "Type", "Tipo"), attachment.mimeType.c_str());
+        ImGui::Text("%s : %s", Tr(uiState, "Size", "Tamano"), FormatAttachmentSize(attachment.sizeBytes).c_str());
         ImGui::Spacing();
 
         const bool isRemoteAttachment = attachment.localPath.empty() && attachment.ownerUser != state.CurrentIdentity();
         uiState.attachmentModalLoading =
             isRemoteAttachment && attachment.state == AttachmentTransferState::Requested;
         if (uiState.attachmentModalLoading) {
-            ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.4f, 1.0f), "Receiving attachment...");
+            ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.4f, 1.0f), "%s",
+                               Tr(uiState, "Receiving attachment...", "Recibiendo adjunto..."));
         } else if (!uiState.attachmentModalError.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.32f, 1.0f), "%s", uiState.attachmentModalError.c_str());
         } else if (isRemoteAttachment) {
-            ImGui::TextWrapped("Attachment metadata received. Download only when you choose Preview or Save As.");
+            ImGui::TextWrapped("%s",
+                               Tr(uiState,
+                                  "Attachment metadata received. Download only when you choose Preview or Save As.",
+                                  "Metadatos recibidos. La descarga empieza al elegir Previsualizar o Guardar como."));
         } else if (attachment.kind == AttachmentKind::Image) {
             std::string previewError;
             if (EnsureImagePreviewTexture(attachment.localPath, uiState.attachmentPreviewTexture, previewError)) {
@@ -446,32 +455,37 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
                 uiState.attachmentModalError = previewError;
             }
         } else {
-            ImGui::TextWrapped("Video ready. Use Open to launch it with the system player.");
+            ImGui::TextWrapped("%s",
+                               Tr(uiState,
+                                  "Video ready. Use Open to launch it with the system player.",
+                                  "Video listo. Usa Abrir para iniciarlo con el reproductor del sistema."));
         }
 
         ImGui::Spacing();
         if (isRemoteAttachment && attachment.kind != AttachmentKind::File) {
-            if (ImGui::Button("Preview", ImVec2(110, 0))) {
+            if (ImGui::Button(Tr(uiState, "Preview", "Previsualizar"), ImVec2(110, 0))) {
                 const std::string previewPath = BuildAttachmentCachePath(attachment.id, attachment.displayName);
                 if (!client.RequestAttachment(attachment, previewPath, "preview"))
                     uiState.attachmentModalError = state.LastError().empty()
-                        ? "No se pudo solicitar la previsualizacion."
+                        ? Tr(uiState,
+                             "Could not request the preview.",
+                             "No se pudo solicitar la previsualizacion.")
                         : state.LastError();
             }
             ImGui::SameLine();
         }
         if (attachment.kind != AttachmentKind::File && !attachment.localPath.empty()) {
-            if (ImGui::Button("Open", ImVec2(110, 0))) {
+            if (ImGui::Button(Tr(uiState, "Open", "Abrir"), ImVec2(110, 0))) {
                 if (!OpenPathWithShell(attachment.localPath))
                     uiState.attachmentModalError =
                         attachment.kind == AttachmentKind::Image
-                            ? "No se pudo abrir la imagen."
-                            : "No se pudo abrir el video.";
+                            ? Tr(uiState, "Could not open the image.", "No se pudo abrir la imagen.")
+                            : Tr(uiState, "Could not open the video.", "No se pudo abrir el video.");
             }
             ImGui::SameLine();
         }
         if (!attachment.localPath.empty()) {
-            if (ImGui::Button("Save As...", ImVec2(110, 0))) {
+            if (ImGui::Button(Tr(uiState, "Save As...", "Guardar como..."), ImVec2(110, 0))) {
                 std::string savePath;
                 std::string saveError;
                 if (PickAttachmentSavePath(attachment, savePath, saveError)) {
@@ -483,10 +497,10 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
             }
             ImGui::SameLine();
         } else if (isRemoteAttachment) {
-            if (ImGui::Button("Save As...", ImVec2(110, 0))) SaveAttachmentAs(client, state, attachment);
+            if (ImGui::Button(Tr(uiState, "Save As...", "Guardar como..."), ImVec2(110, 0))) SaveAttachmentAs(client, state, attachment);
             ImGui::SameLine();
         }
-        if (ImGui::Button("Close", ImVec2(110, 0))) keepOpen = false;
+        if (ImGui::Button(Tr(uiState, "Close", "Cerrar"), ImVec2(110, 0))) keepOpen = false;
         ImGui::EndPopup();
     }
 
@@ -523,31 +537,51 @@ ImVec4 UiStatusColor(ConnState state) {
     return ImVec4(1, 1, 1, 1);
 }
 
-void RenderHeaderBar(const ChatState& state, float width, const UiPalette& palette) {
+void RenderHeaderBar(ChatState& state, ClientUiState& uiState, float width, const UiPalette& palette) {
     const bool compactLayout = IsCompactLayout(width);
     const float headerHeight = HeaderHeightForWidth(width);
     ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(width, headerHeight), ImColor(palette.bbsBlue));
     ImGui::SetCursorPos(ImVec2(10, 6));
-    ImGui::Text("Active Users %d <SECURE UPLINK>", state.ActiveUserCount());
+    ImGui::Text("%s %d <%s>",
+                Tr(uiState, "Active Users", "Usuarios activos"),
+                state.ActiveUserCount(),
+                Tr(uiState, "SECURE UPLINK", "ENLACE SEGURO"));
+    const std::string currentIdentity = state.CurrentIdentity();
+
+    const float langButtonWidth = 48.0f;
+    ImGui::SetCursorPos(ImVec2(width - langButtonWidth - 10.0f, 6.0f));
+    if (ImGui::Button(uiState.spanishUi ? "EN" : "ES", ImVec2(langButtonWidth, 24.0f))) {
+        uiState.spanishUi = !uiState.spanishUi;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s",
+                          Tr(uiState,
+                             "Switch interface to Spanish",
+                             "Cambiar interfaz a ingles"));
+    }
 
     if (compactLayout) {
         ImGui::SetCursorPos(ImVec2(10, 28));
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "[%s]", UiStatusLabel(state.GetConnectionState()));
+        ImGui::TextColored(ImVec4(1, 1, 0, 1), "[%s]",
+                           UiStatusLabelForLanguage(state.GetConnectionState(), uiState.spanishUi));
         if (width > 360.0f) {
-            ImGui::SetCursorPos(ImVec2(width - 170.0f, 28));
-            ImGui::TextDisabled("termux/mobile layout");
+            ImGui::SetCursorPos(ImVec2(width - 210.0f, 32));
+            ImGui::TextDisabled("%s", Tr(uiState, "compact layout", "vista compacta"));
         }
         return;
     }
 
-    ImGui::SetCursorPos(ImVec2(width - 320, 2));
-    ImGui::TextDisabled("MBmon for MBSE BBS version 0.37.6");
-    ImGui::SetCursorPos(ImVec2(width - 320, 18));
-    ImGui::TextColored(ImVec4(1, 1, 0, 1), "Copyright (C) 1997-2026");
-    ImGui::SameLine();
+    ImGui::SetCursorPos(ImVec2(width - 380, 4));
+    ImGui::TextDisabled("%s", currentIdentity.empty()
+                                    ? Tr(uiState, "Not signed in", "Sin sesion")
+                                    : currentIdentity.c_str());
+    ImGui::SetCursorPos(ImVec2(width - 380, 22));
+    ImGui::TextColored(ImVec4(1, 1, 0, 1), "%s",
+                       UiStatusLabelForLanguage(state.GetConnectionState(), uiState.spanishUi));
+    ImGui::SameLine(0, 8);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.8f, 0, 0, 1));
-    ImGui::BeginChild("##Busy", ImVec2(40, 18), false);
-    ImGui::Text("Busy");
+    ImGui::BeginChild("##Busy", ImVec2(64, 18), false);
+    ImGui::Text("%s", Tr(uiState, "LIVE", "ACTIVO"));
     ImGui::EndChild();
     ImGui::PopStyleColor();
 }
@@ -566,7 +600,7 @@ void RenderUnauthenticatedUi(ChatClient& client,
                               connState == ConnState::DISCONNECTED;
 
     if (isConnecting) {
-        RenderConnectionScreen(state, width, height, connState, palette);
+        RenderConnectionScreen(state, uiState, width, height, connState, palette);
     } else if (mustChangeCredentials) {
         RenderCredentialChangeScreen(client, state, uiState, width, height, connState, palette);
     } else {
@@ -591,11 +625,15 @@ void RenderAuthenticatedUi(ChatClient& client,
 
     if (compactLayout) {
         ImGui::SetCursorPos(ImVec2(8, headerHeight + 6));
-        if (ImGui::Button(uiState.usersPanelOpen ? "Hide Users" : "Show Users", ImVec2(120, 34))) {
+        if (ImGui::Button(uiState.usersPanelOpen
+                              ? Tr(uiState, "Hide Users", "Ocultar usuarios")
+                              : Tr(uiState, "Show Users", "Ver usuarios"),
+                          ImVec2(136, 34))) {
             uiState.usersPanelOpen = !uiState.usersPanelOpen;
         }
         ImGui::SameLine();
-        ImGui::TextColored(UiStatusColor(state.GetConnectionState()), "[%s]", UiStatusLabel(state.GetConnectionState()));
+        ImGui::TextColored(UiStatusColor(state.GetConnectionState()), "[%s]",
+                           UiStatusLabelForLanguage(state.GetConnectionState(), uiState.spanishUi));
         feedTop += 46.0f;
 
         if (uiState.usersPanelOpen) {
@@ -634,7 +672,7 @@ void RenderAuthenticatedUi(ChatClient& client,
         ImGui::SetCursorPos(ImVec2(8, feedTop));
         ImGui::BeginChild("##Feed", ImVec2(width - 16.0f, inputTop - feedTop), false);
     }
-    ImGui::SetWindowFontScale(0.76f);
+    ImGui::SetWindowFontScale(compactLayout ? 0.88f : 0.92f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1));
     const std::vector<LogEntry> logs = state.SnapshotLogs();
     ImGuiListClipper clipper;
@@ -668,35 +706,65 @@ void RenderAuthenticatedUi(ChatClient& client,
     ImGui::SetWindowFontScale(1.0f);
     ImGui::EndChild();
 
-    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(0, inputTop), ImVec2(width, height - footerHeight), ImColor(palette.bbsBlue));
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        ImVec2(0, inputTop),
+        ImVec2(width, height - footerHeight),
+        ImColor(palette.bbsBlue));
 
-    ImGui::SetCursorPos(ImVec2(10, inputTop + 6));
+    const float composerScale = compactLayout ? 1.02f : 1.12f;
+    const float consoleHeight = compactLayout ? 52.0f : 50.0f;
+    const float bandHeight = height - footerHeight - inputTop;
+    const float consoleY = inputTop + (bandHeight - consoleHeight) * 0.5f;
+    const float attachButtonWidth = compactLayout ? 116.0f : 96.0f;
+    const float gap = 10.0f;
+    const float leftPad = 10.0f;
+    const float consoleWidth = width - leftPad * 2.0f - attachButtonWidth - gap;
+
+    ImGui::SetWindowFontScale(composerScale);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 1));
+    ImGui::PushStyleColor(ImGuiCol_Border, palette.bbsWhite);
+    ImGui::SetCursorPos(ImVec2(leftPad, consoleY));
+    ImGui::BeginChild("##ConsoleInputBox", ImVec2(consoleWidth, consoleHeight), true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    const float textY = (consoleHeight - ImGui::GetTextLineHeight()) * 0.5f;
+    ImGui::SetCursorPos(ImVec2(8.0f, textY));
     ImGui::TextColored(palette.bbsMagenta, "%s", currentIdentity.c_str());
     ImGui::SameLine(0, 0);
     ImGui::TextColored(palette.bbsLime, "-->");
     ImGui::SameLine();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, compactLayout ? ImVec2(4, 8) : ImVec2(0, 0));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-    const float attachButtonWidth = compactLayout ? 110.0f : 84.0f;
-    ImGui::SetCursorPos(ImVec2(10, inputTop + (compactLayout ? 30.0f : 22.0f)));
-    ImGui::SetNextItemWidth(-attachButtonWidth - 20.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 1));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 1));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0, 0, 0, 1));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::SetNextItemWidth(-1.0f);
     if (!ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere(0);
-    if (ImGui::InputText(
-            "##CMD",
-            uiState.input,
-            512,
-            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
-            CommandInputCallback)) {
+    if (ImGui::InputText("##CMD",
+                         uiState.input,
+                         512,
+                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
+                         CommandInputCallback)) {
         if (uiState.input[0] != '\0') {
             ProcessLocalCommand(client, state, currentIdentity, uiState.input);
             std::memset(uiState.input, 0, sizeof(uiState.input));
         }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Attach", ImVec2(attachButtonWidth, 0))) HandleAttachButton(uiState);
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(4);
     ImGui::PopStyleVar();
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+
+    ImGui::SameLine(0, gap);
+    ImGui::SetCursorPosY(consoleY);
+    if (ImGui::Button(Tr(uiState, "Attach", "Adjuntar"), ImVec2(attachButtonWidth, consoleHeight))) {
+        HandleAttachButton(client, state, uiState);
+    }
+    ImGui::SetWindowFontScale(1.0f);
 
     RenderAttachPickerModal(client, state, uiState);
     RenderAttachmentModal(client, state, uiState);

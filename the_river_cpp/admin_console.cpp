@@ -1,6 +1,9 @@
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
+#include <chrono>
 
 #ifdef _WIN32
 #include <conio.h>
@@ -10,15 +13,78 @@
 #endif
 
 #include "common/security_utils.h"
+#include "common/secure_envelope.h"
 #include "common/shared_config.h"
 #include "common/tor_connection.h"
-#include "include/aes.h"
 
 namespace {
+
+void ClearScreen() {
+    std::cout << "\033[2J\033[H";
+}
+
+void Typewriter(const std::string& text, int delay_ms = 20) {
+    for (char c : text) {
+        std::cout << c << std::flush;
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+    std::cout << std::endl;
+}
+
+void DrawLogo() {
+    std::cout << "\033[1;32m";
+    std::cout << R"(
+  _______ _    _ ______   _____  _______      ________ _____
+ |__   __| |  | |  ____| |  __ \|_   _\ \    / /  ____|  __ \
+    | |  | |__| | |__    | |__) | | |  \ \  / /| |__  | |__) |
+    | |  |  __  |  __|   |  _  /  | |   \ \/ / |  __| |  _  /
+    | |  | |  | | |____  | | \ \ _| |_   \  /  | |____| | \ \
+    |_|  |_|  |_|______| |_|  \_\\_____|   \/   |______|_|  \_/
+    )" << "\n";
+    std::cout << "  [ THE RIVER SECURE ADMINISTRATION TERMINAL v2.0 ]\n";
+    std::cout << "\033[0m" << std::endl;
+}
+
+void BootAnimation() {
+    ClearScreen();
+    DrawLogo();
+    std::cout << "\033[1;32m";
+    Typewriter("[*] INITIALIZING CORE MODULES...", 30);
+    Typewriter("[*] LOADING RSA/AES CRYPTO HANDLERS...", 30);
+    Typewriter("[*] ESTABLISHING SOCKS5 PROXY LINK...", 50);
+    Typewriter("[*] TUNNELING THROUGH ONION NETWORK...", 80);
+    std::cout << "\033[0m\n";
+}
 
 void SendLine(SocketHandle sock, const std::string& msg) {
     std::string full = msg + "\n";
     send(sock, full.c_str(), (int)full.size(), 0);
+}
+
+bool ReadProtocolLine(SocketHandle sock, std::string& line) {
+    line.clear();
+    char c = '\0';
+    while (true) {
+        int bytes = recv(sock, &c, 1, 0);
+        if (bytes <= 0) return false;
+        if (c == '\n') return true;
+        if (c != '\r') line.push_back(c);
+        if (line.size() > 65536) return false;
+    }
+}
+
+std::vector<std::string> SplitWhitespace(const std::string& input) {
+    std::stringstream ss(input);
+    std::vector<std::string> parts;
+    std::string part;
+    while (ss >> part) parts.push_back(part);
+    return parts;
+}
+
+std::string DecryptWirePayload(const std::string& payload) {
+    std::string plain;
+    if (!river::OpenPayload(payload, plain)) return "[AUTH_ERR]";
+    return plain;
 }
 
 std::string ReadSecretLine() {
@@ -77,34 +143,32 @@ void ReceiverLoop(SocketHandle sock) {
             }
 
             if (line.find("[[USERS]]:") == 0 || line.find("[USERS]:") == 0) {
-                // Silenciar protocolos de usuarios en consola admin
                 continue;
             }
 
+            std::cout << "\r\033[K"; // Clear current line
             if (line.find("[PM]:") == 0) {
                 std::string rest = line.substr(5);
                 size_t sep = rest.find(':');
                 std::string from = sep == std::string::npos ? rest : rest.substr(0, sep);
                 std::string enc = sep == std::string::npos ? "" : rest.substr(sep + 1);
-                std::string dec = AESHelper::Decrypt(enc, river::EncryptionKey(), "");
-                std::cout << "\r\033[K[PM de " << from << "]: " << dec << "\nADMIN> " << std::flush;
-            } else if (line.find("SYSTEM") == std::string::npos && line.find(':') != std::string::npos) {
+                std::string dec = DecryptWirePayload(enc);
+                std::cout << "\033[1;33m[PM de " << from << "]:\033[0m " << dec << "\n\033[1;32mADMIN>\033[0m " << std::flush;
+            } else if (line.find("SYSTEM") != std::string::npos) {
+                std::cout << "\033[1;31m" << line << "\033[0m\n\033[1;32mADMIN>\033[0m " << std::flush;
+            } else if (line.find(':') != std::string::npos) {
                 size_t sep = line.find(':');
                 std::string user = line.substr(0, sep);
                 std::string enc = line.substr(sep + 1);
-                std::string dec = AESHelper::Decrypt(enc, river::EncryptionKey(), "");
-                
-                // Fallback si no es encriptado
-                if (dec.find("[DECRYPT_ERR]") != std::string::npos) dec = enc;
-                
-                std::cout << "\r\033[K[" << user << "]: " << dec << "\nADMIN> " << std::flush;
+                std::string dec = DecryptWirePayload(enc);
+                std::cout << "\033[1;36m[" << user << "]:\033[0m " << dec << "\n\033[1;32mADMIN>\033[0m " << std::flush;
             } else {
-                std::cout << "\r\033[K" << line << "\nADMIN> " << std::flush;
+                std::cout << line << "\n\033[1;32mADMIN>\033[0m " << std::flush;
             }
         }
     }
 
-    std::cout << "\n[!] Conexion cerrada.\n";
+    std::cout << "\n\033[1;31m[!] CONEXION FINALIZADA POR EL SERVIDOR.\033[0m\n";
 }
 
 }
@@ -115,17 +179,18 @@ int main() {
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
 
-    std::cout << "--- THE RIVER | ADMIN CONSOLE ---" << std::endl;
+    BootAnimation();
+
     if (!river::HasRequiredClientConfig()) {
-        std::cerr << "[!] Faltan THE_RIVER_ONION y/o THE_RIVER_AES_KEY." << std::endl;
+        std::cerr << "\033[1;31m[!] FATAL: Faltan variables de entorno (THE_RIVER_ONION / THE_RIVER_AES_KEY).\033[0m" << std::endl;
         return 1;
     }
 
     std::string adminUser;
     std::string adminPass;
-    std::cout << "ADMIN IDENT : ";
+    std::cout << "\033[1;32mIDENTIFICADOR DE ACCESO: \033[0m";
     std::getline(std::cin, adminUser);
-    std::cout << "ADMIN KEY   : ";
+    std::cout << "\033[1;32mCLAVE DE ENCRIPTACION : \033[0m";
     adminPass = ReadSecretLine();
 
     TorEndpoint endpoint{
@@ -135,33 +200,86 @@ int main() {
         (unsigned short)river::kTorOnionPort
     };
 
-    std::cout << "[*] Conectando por Tor..." << std::endl;
+    std::cout << "\033[1;32m[*] CONECTANDO AL NODO ONION...\033[0m" << std::endl;
     SocketHandle adminSocket = ConnectViaTor(endpoint);
     if (!IsSocketValid(adminSocket)) {
-        std::cerr << "[!] Tor no disponible o conexion .onion rechazada. Saliendo." << std::endl;
+        std::cerr << "\033[1;31m[!] ERROR: Tor no responde o la direccion .onion es inaccesible.\033[0m" << std::endl;
         return 1;
     }
 
-    std::string login = "[LOGIN]:" + adminUser + ":" + adminPass + ":" + MakeStableMachineId();
-    SendLine(adminSocket, login);
+    const std::string hwid = MakeStableMachineId();
+    SendLine(adminSocket, "[LOGIN_INIT]:" + adminUser + ":" + hwid);
+    
+    std::string challenge;
+    bool gotChallenge = false;
+    for (int i = 0; i < 5; ++i) {
+        if (!ReadProtocolLine(adminSocket, challenge)) break;
+        if (challenge.rfind("AUTH_CHALLENGE:", 0) == 0) {
+            gotChallenge = true;
+            break;
+        }
+    }
+
+    if (!gotChallenge) {
+        std::cerr << "\033[1;31m[!] ERROR: El servidor no ha emitido un reto de autenticacion.\033[0m" << std::endl;
+        CloseSocketHandle(adminSocket);
+        return 1;
+    }
+
+    std::vector<std::string> challengeParts;
+    {
+        std::stringstream ss(challenge);
+        std::string part;
+        while (std::getline(ss, part, ':')) challengeParts.push_back(part);
+    }
+
+    if (challengeParts.size() < 3) {
+        std::cerr << "\033[1;31m[!] ERROR: Reto corrupto o incompatible.\033[0m" << std::endl;
+        CloseSocketHandle(adminSocket);
+        return 1;
+    }
+
+    const std::string verifier = DerivePasswordVerifier(adminPass, challengeParts[2]);
+    if (verifier.empty()) {
+        std::cerr << "\033[1;31m[!] ERROR: Derivacion de clave fallida.\033[0m" << std::endl;
+        CloseSocketHandle(adminSocket);
+        return 1;
+    }
+    const std::string proof = HmacSha256Hex(verifier, challengeParts[1] + "|" + adminUser + "|" + hwid);
+    SendLine(adminSocket, "[LOGIN_PROOF]:" + adminUser + ":" + hwid + ":" + proof);
 
     std::thread receiver(ReceiverLoop, adminSocket);
 
     std::string input;
-    std::cout << "ADMIN> ";
+    std::cout << "\033[1;32mADMIN>\033[0m ";
     while (std::getline(std::cin, input)) {
-        if (input == "/exit") break;
+        if (input == "/exit" || input == "/quit") break;
         if (input.empty()) {
-            std::cout << "ADMIN> ";
+            std::cout << "\033[1;32mADMIN>\033[0m ";
             continue;
         }
 
-        std::string enc = AESHelper::Encrypt(input, river::EncryptionKey(), "");
+        if (input == "/clear") {
+            ClearScreen();
+            DrawLogo();
+            std::cout << "\033[1;32mADMIN>\033[0m ";
+            continue;
+        }
+
+        std::vector<std::string> parts = SplitWhitespace(input);
+        if (parts.size() == 2 && parts[0] == "/passwd") {
+            std::cout << "\033[1;33mNUEVA CLAVE PARA " << parts[1] << ": \033[0m";
+            const std::string newPass = ReadSecretLine();
+            input = "/passwd " + parts[1] + " " + newPass;
+        }
+
+        std::string enc = river::SealPayload(input);
         SendLine(adminSocket, adminUser + ":" + enc);
-        std::cout << "ADMIN> ";
+        std::cout << "\033[1;32mADMIN>\033[0m ";
     }
 
+    std::cout << "\033[1;32m[*] CERRANDO SESION SEGURA...\033[0m\n";
     CloseSocketHandle(adminSocket);
-    receiver.join();
+    if (receiver.joinable()) receiver.join();
     return 0;
 }

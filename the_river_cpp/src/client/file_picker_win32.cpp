@@ -20,13 +20,13 @@ bool PickAttachmentFile(AttachmentDraft& draft, std::string& error) {
     ofn.nMaxFile = sizeof(filePath);
     ofn.lpstrFilter =
         "Archivos soportados\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.mp4;*.webm;*.avi;*.mov;*.mkv;*.txt;*.log;*.pdf;*.zip;*.json;*.md\0"
-        "Todos los archivos\0*.*\0";
+        "All files\0*.*\0";
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
 
     if (!GetOpenFileNameA(&ofn)) {
         const DWORD dialogError = CommDlgExtendedError();
-        if (dialogError != 0) error = "No se pudo abrir el selector de archivos.";
+        if (dialogError != 0) error = "Could not open the file picker.";
         return false;
     }
 
@@ -41,13 +41,13 @@ bool PickAttachmentSavePath(const AttachmentPayload& attachment, std::string& sa
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFile = filePath;
     ofn.nMaxFile = sizeof(filePath);
-    ofn.lpstrFilter = "Todos los archivos\0*.*\0";
+    ofn.lpstrFilter = "All files\0*.*\0";
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
 
     if (!GetSaveFileNameA(&ofn)) {
         const DWORD dialogError = CommDlgExtendedError();
-        if (dialogError != 0) error = "No se pudo abrir el dialogo Guardar como.";
+        if (dialogError != 0) error = "Could not open the Save As dialog.";
         return false;
     }
 

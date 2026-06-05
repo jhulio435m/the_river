@@ -32,14 +32,14 @@ std::wstring ToWide(const std::string& value) {
 bool EnsureImagePreviewTexture(const std::string& path, ImagePreviewTexture& texture, std::string& error) {
     if (texture.textureId != 0 && texture.sourcePath == path) return true;
     if (!EnsureGdiplusReady()) {
-        error = "No se pudo inicializar GDI+ para la vista previa.";
+        error = "Could not initialize GDI+ for preview.";
         return false;
     }
 
     ReleaseImagePreviewTexture(texture);
     Gdiplus::Bitmap bitmap(ToWide(path).c_str());
     if (bitmap.GetLastStatus() != Gdiplus::Ok) {
-        error = "No se pudo decodificar la imagen para la vista previa.";
+        error = "Could not decode the image preview.";
         return false;
     }
 
@@ -48,7 +48,7 @@ bool EnsureImagePreviewTexture(const std::string& path, ImagePreviewTexture& tex
     Gdiplus::Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
     Gdiplus::BitmapData bitmapData{};
     if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &bitmapData) != Gdiplus::Ok) {
-        error = "No se pudo leer la imagen para la vista previa.";
+        error = "Could not read the image preview.";
         return false;
     }
 

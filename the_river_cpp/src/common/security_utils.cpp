@@ -1,8 +1,10 @@
 #include "common/security_utils.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <iomanip>
 #include <limits.h>
+#include <random>
 #include <sstream>
 #include <vector>
 
@@ -62,6 +64,172 @@ std::string HashPassword(const std::string& input) {
     for (int i = 0; i < 8; ++i)
         ss << std::hex << std::setw(8) << std::setfill('0') << h[i];
     return ss.str();
+}
+
+namespace {
+
+std::vector<unsigned char> HexToBytes(const std::string& hex) {
+    std::vector<unsigned char> out;
+    if (hex.size() % 2 != 0) return out;
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        unsigned int value = 0;
+        std::stringstream ss;
+        ss << std::hex << hex.substr(i, 2);
+        ss >> value;
+        out.push_back(static_cast<unsigned char>(value & 0xff));
+    }
+    return out;
+}
+
+std::string BytesToHex(const std::vector<unsigned char>& bytes) {
+    std::stringstream ss;
+    for (unsigned char b : bytes)
+        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+    return ss.str();
+}
+
+std::vector<unsigned char> Sha256Bytes(const std::string& input) {
+    return HexToBytes(HashPassword(input));
+}
+
+std::string HmacSha256BytesHex(const std::string& key, const std::string& message) {
+    std::string normalizedKey = key;
+    if (normalizedKey.size() > 64) {
+        const std::vector<unsigned char> keyDigest = Sha256Bytes(normalizedKey);
+        normalizedKey.assign(keyDigest.begin(), keyDigest.end());
+    }
+    normalizedKey.resize(64, '\0');
+
+    std::string oKeyPad(64, '\0');
+    std::string iKeyPad(64, '\0');
+    for (std::size_t i = 0; i < 64; ++i) {
+        oKeyPad[i] = static_cast<char>(normalizedKey[i] ^ 0x5c);
+        iKeyPad[i] = static_cast<char>(normalizedKey[i] ^ 0x36);
+    }
+    const std::vector<unsigned char> inner = Sha256Bytes(iKeyPad + message);
+    const std::string innerBytes(inner.begin(), inner.end());
+    return HashPassword(oKeyPad + innerBytes);
+}
+
+std::vector<unsigned char> Pbkdf2HmacSha256(const std::string& password,
+                                            const std::string& saltHex,
+                                            int iterations,
+                                            std::size_t outputBytes) {
+    const std::vector<unsigned char> salt = HexToBytes(saltHex);
+    std::vector<unsigned char> output;
+    output.reserve(outputBytes);
+    const std::size_t hashLen = 32;
+    const std::size_t blockCount = (outputBytes + hashLen - 1) / hashLen;
+
+    for (std::size_t block = 1; block <= blockCount; ++block) {
+        std::string saltBlock(salt.begin(), salt.end());
+        saltBlock.push_back(static_cast<char>((block >> 24) & 0xff));
+        saltBlock.push_back(static_cast<char>((block >> 16) & 0xff));
+        saltBlock.push_back(static_cast<char>((block >> 8) & 0xff));
+        saltBlock.push_back(static_cast<char>(block & 0xff));
+
+        std::vector<unsigned char> u = HexToBytes(HmacSha256BytesHex(password, saltBlock));
+        std::vector<unsigned char> t = u;
+        for (int i = 1; i < iterations; ++i) {
+            const std::string uBytes(u.begin(), u.end());
+            u = HexToBytes(HmacSha256BytesHex(password, uBytes));
+            for (std::size_t j = 0; j < t.size(); ++j) t[j] ^= u[j];
+        }
+        output.insert(output.end(), t.begin(), t.end());
+    }
+    output.resize(outputBytes);
+    return output;
+}
+
+bool ConstantTimeEquals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    unsigned char diff = 0;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+std::vector<std::string> Split(const std::string& value, char delimiter) {
+    std::vector<std::string> parts;
+    std::stringstream ss(value);
+    std::string part;
+    while (std::getline(ss, part, delimiter)) parts.push_back(part);
+    return parts;
+}
+
+}  // namespace
+
+std::string RandomHex(std::size_t bytes) {
+    std::random_device rd;
+    std::uniform_int_distribution<int> dis(0, 255);
+    std::vector<unsigned char> out(bytes);
+    for (unsigned char& b : out) b = static_cast<unsigned char>(dis(rd));
+    return BytesToHex(out);
+}
+
+std::string HmacSha256Hex(const std::string& key, const std::string& message) {
+    return HmacSha256BytesHex(key, message);
+}
+
+std::string MakePasswordHash(const std::string& password) {
+    constexpr int kIterations = 120000;
+    const std::string salt = RandomHex(16);
+    const std::string digest = BytesToHex(Pbkdf2HmacSha256(password, salt, kIterations, 32));
+    return "pbkdf2-sha256$" + std::to_string(kIterations) + "$" + salt + "$" + digest;
+}
+
+std::string DerivePasswordVerifier(const std::string& password, const std::string& hashSpec) {
+    if (hashSpec.rfind("pbkdf2-sha256$", 0) == 0) {
+        const std::vector<std::string> parts = Split(hashSpec, '$');
+        if (parts.size() != 3) return "";
+        int iterations = 0;
+        try {
+            iterations = std::stoi(parts[1]);
+        } catch (...) {
+            return "";
+        }
+        if (iterations <= 0) return "";
+        const std::string digest = BytesToHex(Pbkdf2HmacSha256(password, parts[2], iterations, 32));
+        return hashSpec + "$" + digest;
+    }
+    return "";
+}
+
+bool VerifyPasswordHash(const std::string& password, const std::string& storedHash) {
+    if (storedHash.rfind("pbkdf2-sha256$", 0) == 0) {
+        const std::vector<std::string> parts = Split(storedHash, '$');
+        if (parts.size() != 4) return false;
+        int iterations = 0;
+        try {
+            iterations = std::stoi(parts[1]);
+        } catch (...) {
+            return false;
+        }
+        if (iterations <= 0) return false;
+        const std::string digest = BytesToHex(Pbkdf2HmacSha256(password, parts[2], iterations, 32));
+        return ConstantTimeEquals(digest, parts[3]);
+    }
+    return false;
+}
+
+bool IsValidUsername(const std::string& username) {
+    if (username.size() < 3 || username.size() > 24) return false;
+    for (unsigned char c : username) {
+        const bool ok = (c >= 'a' && c <= 'z') ||
+                        (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') ||
+                        c == '_' || c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool IsStrongEnoughPassword(const std::string& password) {
+    if (password.size() < 10 || password.size() > 128) return false;
+    return password.find(':') == std::string::npos &&
+           password.find('\n') == std::string::npos &&
+           password.find('\r') == std::string::npos;
 }
 
 std::string MakeStableMachineId() {

@@ -79,7 +79,7 @@ void RenderChatUi(ChatClient& client,
         ImVec4(1.0f, 1.0f, 1.0f, 1.0f)
     };
 
-    RenderHeaderBar(state, width, palette);
+    RenderHeaderBar(state, uiState, width, palette);
     if (state.IsAuthenticated() && state.GetConnectionState() == ConnState::AUTHENTICATED)
         RenderAuthenticatedUi(client, state, uiState, width, height, palette);
     else

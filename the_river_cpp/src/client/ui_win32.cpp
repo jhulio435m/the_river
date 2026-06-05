@@ -156,7 +156,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     ImGui_ImplWin32_InitForOpenGL(hwnd);
     ImGui_ImplOpenGL3_Init();
 
-    // Gestionar el proceso Tor local automáticamente
+    // Manage the local Tor process automatically.
     EnsureLocalTorIsRunning();
 
     ChatState state;

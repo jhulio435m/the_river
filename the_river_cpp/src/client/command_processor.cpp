@@ -13,12 +13,12 @@ void ProcessLocalCommand(ChatClient& client,
     }
 
     if (input == "/help") {
-        state.AddSystemLog("Comandos: /clear /help /users /ping");
+        state.AddSystemLog("Commands: /clear /help /users /ping");
         return;
     }
 
     if (input == "/users") {
-        std::string list = "Nodos activos: ";
+        std::string list = "Active nodes: ";
         for (const auto& user : state.SnapshotActiveUsers()) list += user + " ";
         state.AddSystemLog(list);
         return;
@@ -26,14 +26,14 @@ void ProcessLocalCommand(ChatClient& client,
 
     if (input == "/ping") {
         if (client.SendPing())
-            state.AddSystemLog("PING enviado al servidor.");
+            state.AddSystemLog("PING sent to server.");
         else
-            state.AddSystemLog("No se pudo enviar PING.");
+            state.AddSystemLog("Could not send PING.");
         return;
     }
 
     if (!input.empty()) {
         if (!client.SendChatMessage(currentUser, input))
-            state.AddSystemLog("No se pudo enviar el mensaje.");
+            state.AddSystemLog("Could not send the message.");
     }
 }

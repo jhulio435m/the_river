@@ -62,7 +62,16 @@ bool CommandExists(const char* command) {
 bool TryZenityFileSelection(std::string& path) {
     int exitCode = -1;
     std::string output;
-    if (!RunCommandCapture("zenity --file-selection --title='Seleccionar adjunto'", output, exitCode)) return false;
+    if (!RunCommandCapture("zenity --file-selection --title='Select attachment'", output, exitCode)) return false;
+    if (exitCode != 0 || output.empty()) return false;
+    path = output;
+    return true;
+}
+
+bool TryYadFileSelection(std::string& path) {
+    int exitCode = -1;
+    std::string output;
+    if (!RunCommandCapture("yad --file-selection --title='Select attachment'", output, exitCode)) return false;
     if (exitCode != 0 || output.empty()) return false;
     path = output;
     return true;
@@ -71,7 +80,7 @@ bool TryZenityFileSelection(std::string& path) {
 bool TryQarmaFileSelection(std::string& path) {
     int exitCode = -1;
     std::string output;
-    if (!RunCommandCapture("qarma --file-selection --title='Seleccionar adjunto'", output, exitCode)) return false;
+    if (!RunCommandCapture("qarma --file-selection --title='Select attachment'", output, exitCode)) return false;
     if (exitCode != 0 || output.empty()) return false;
     path = output;
     return true;
@@ -80,7 +89,7 @@ bool TryQarmaFileSelection(std::string& path) {
 bool TryMateDialogFileSelection(std::string& path) {
     int exitCode = -1;
     std::string output;
-    if (!RunCommandCapture("matedialog --file-selection --title='Seleccionar adjunto'", output, exitCode)) return false;
+    if (!RunCommandCapture("matedialog --file-selection --title='Select attachment'", output, exitCode)) return false;
     if (exitCode != 0 || output.empty()) return false;
     path = output;
     return true;
@@ -97,7 +106,19 @@ bool TryKDialogFileSelection(std::string& path) {
 
 bool TryZenitySaveSelection(const std::string& fileName, std::string& path) {
     const std::string command =
-        "zenity --file-selection --save --confirm-overwrite --title='Guardar adjunto como' --filename=" +
+        "zenity --file-selection --save --confirm-overwrite --title='Save attachment as' --filename=" +
+        ShellQuote(fileName);
+    int exitCode = -1;
+    std::string output;
+    if (!RunCommandCapture(command, output, exitCode)) return false;
+    if (exitCode != 0 || output.empty()) return false;
+    path = output;
+    return true;
+}
+
+bool TryYadSaveSelection(const std::string& fileName, std::string& path) {
+    const std::string command =
+        "yad --file-selection --save --confirm-overwrite --title='Save attachment as' --filename=" +
         ShellQuote(fileName);
     int exitCode = -1;
     std::string output;
@@ -109,7 +130,7 @@ bool TryZenitySaveSelection(const std::string& fileName, std::string& path) {
 
 bool TryQarmaSaveSelection(const std::string& fileName, std::string& path) {
     const std::string command =
-        "qarma --file-selection --save --confirm-overwrite --title='Guardar adjunto como' --filename=" +
+        "qarma --file-selection --save --confirm-overwrite --title='Save attachment as' --filename=" +
         ShellQuote(fileName);
     int exitCode = -1;
     std::string output;
@@ -121,7 +142,7 @@ bool TryQarmaSaveSelection(const std::string& fileName, std::string& path) {
 
 bool TryMateDialogSaveSelection(const std::string& fileName, std::string& path) {
     const std::string command =
-        "matedialog --file-selection --save --confirm-overwrite --title='Guardar adjunto como' --filename=" +
+        "matedialog --file-selection --save --confirm-overwrite --title='Save attachment as' --filename=" +
         ShellQuote(fileName);
     int exitCode = -1;
     std::string output;
@@ -155,6 +176,10 @@ bool PickAttachmentFile(AttachmentDraft& draft, std::string& error) {
         if (!TryZenityFileSelection(selectedPath)) return false;
         return BuildAttachmentDraftFromPath(selectedPath, draft, error);
     }
+    if (CommandExists("yad")) {
+        if (!TryYadFileSelection(selectedPath)) return false;
+        return BuildAttachmentDraftFromPath(selectedPath, draft, error);
+    }
     if (CommandExists("qarma")) {
         if (!TryQarmaFileSelection(selectedPath)) return false;
         return BuildAttachmentDraftFromPath(selectedPath, draft, error);
@@ -168,7 +193,7 @@ bool PickAttachmentFile(AttachmentDraft& draft, std::string& error) {
         return BuildAttachmentDraftFromPath(selectedPath, draft, error);
     }
 
-    error = "No se encontro zenity, qarma, matedialog ni kdialog para seleccionar adjuntos en Linux.";
+    error = "No supported file picker was found. Install zenity, yad, qarma, matedialog, or kdialog to attach files.";
     return false;
 }
 
@@ -177,6 +202,10 @@ bool PickAttachmentSavePath(const AttachmentPayload& attachment, std::string& sa
         SanitizeAttachmentFileName(attachment.displayName.empty() ? "attachment.bin" : attachment.displayName);
     if (CommandExists("zenity")) {
         if (TryZenitySaveSelection(defaultName, savePath)) return true;
+        return false;
+    }
+    if (CommandExists("yad")) {
+        if (TryYadSaveSelection(defaultName, savePath)) return true;
         return false;
     }
     if (CommandExists("qarma")) {
@@ -192,7 +221,7 @@ bool PickAttachmentSavePath(const AttachmentPayload& attachment, std::string& sa
         return false;
     }
 
-    error = "No se encontro zenity, qarma, matedialog ni kdialog para elegir la ruta de guardado en Linux.";
+    error = "No supported file picker was found. Install zenity, yad, qarma, matedialog, or kdialog to choose a save path.";
     return false;
 }
 

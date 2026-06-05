@@ -5,8 +5,9 @@
 #include <sstream>
 
 #include "client/attachment_utils.h"
+#include "common/secure_envelope.h"
 #include "common/shared_config.h"
-#include "include/aes.h"
+#include "common/security_utils.h"
 
 ChatState::ChatState() = default;
 
@@ -133,8 +134,8 @@ void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::str
         std::string user = msg.substr(0, sep);
         std::string payload = msg.substr(sep + 1);
 
-        std::string dec = AESHelper::Decrypt(payload, river::EncryptionKey(), "");
-        if (dec.find("[DECRYPT_ERR]") != std::string::npos) dec = payload;
+        std::string dec;
+        if (!river::OpenPayload(payload, dec)) dec = "[AUTH_ERR]";
 
         PushLogLocked({timestamp, user, dec, false, isPm});
         if (user != currentUser) MarkNewMessage();

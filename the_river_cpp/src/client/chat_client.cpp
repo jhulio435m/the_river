@@ -14,10 +14,10 @@
 #include "client/attachment_utils.h"
 #include "client/platform_runtime.h"
 #include "common/base64.h"
+#include "common/secure_envelope.h"
 #include "common/security_utils.h"
 #include "common/shared_config.h"
 #include "common/tor_connection.h"
-#include "include/aes.h"
 
 namespace {
 
@@ -94,6 +94,28 @@ bool ChatClient::ConsumeQueuedAutoLogin(std::string& user, std::string& pass) {
     return true;
 }
 
+void ChatClient::QueueChallengeLogin(const std::string& user, const std::string& pass) {
+    std::lock_guard<std::mutex> lock(reloginMutex_);
+    pendingLoginUser_ = user;
+    pendingLoginPass_ = pass;
+}
+
+bool ChatClient::SendChallengeLogin(const std::string& challengeLine) {
+    std::lock_guard<std::mutex> lock(reloginMutex_);
+    if (pendingLoginUser_.empty() || pendingLoginPass_.empty()) return false;
+
+    const std::vector<std::string> parts = SplitByDelimiter(challengeLine, ':');
+    if (parts.size() < 3) return false;
+    const std::string& nonce = parts[1];
+    const std::string& hashSpec = parts[2];
+    const std::string hwid = MakeStableMachineId();
+    const std::string verifier = DerivePasswordVerifier(pendingLoginPass_, hashSpec);
+    if (verifier.empty()) return false;
+    const std::string proof = HmacSha256Hex(verifier, nonce + "|" + pendingLoginUser_ + "|" + hwid);
+    const std::string user = pendingLoginUser_;
+    return SendRawLine("[LOGIN_PROOF]:" + user + ":" + hwid + ":" + proof + "\n") >= 0;
+}
+
 int ChatClient::SendRawLine(const std::string& payload) {
     std::lock_guard<std::mutex> lock(socketMutex_);
     if (!IsSocketValid(socket_)) return -1;
@@ -119,8 +141,7 @@ int ChatClient::SendRawLine(const std::string& payload) {
 }
 
 bool ChatClient::SendEncryptedPayload(const std::string& user, const std::string& payload) {
-    const std::string enc = AESHelper::Encrypt(payload, river::EncryptionKey(), "");
-    return SendRawLine(user + ":" + enc + "\n") >= 0;
+    return SendRawLine(user + ":" + river::SealPayload(payload) + "\n") >= 0;
 }
 
 void ChatClient::CloseCurrentSocket() {
@@ -138,7 +159,8 @@ bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
     state_.SetConnectionState(ConnState::AUTHENTICATING);
     state_.SetStatusDetail("Autenticando credenciales...");
     AppendClientLog("SendLogin user=" + user);
-    if (SendRawLine("[LOGIN]:" + user + ":" + pass + ":" + MakeStableMachineId() + "\n") < 0) {
+    QueueChallengeLogin(user, pass);
+    if (SendRawLine("[LOGIN_INIT]:" + user + ":" + MakeStableMachineId() + "\n") < 0) {
         state_.SetAuthActionPending(false);
         state_.SetLastError("No hay canal disponible para enviar el login.");
         state_.SetStatusDetail("Sin enlace activo hacia el servidor.");
@@ -153,10 +175,11 @@ bool ChatClient::SendFirstLoginChange(const std::string& newUser, const std::str
     state_.SetConnectionState(ConnState::UPDATING_CREDENTIALS);
     state_.SetStatusDetail("Actualizando identidad inicial...");
     QueueAutoLogin(newUser, newPass);
-    if (SendRawLine("[CHANGE]:" + newUser + ":" + newPass + "\n") < 0) {
+    const std::string encPass = river::SealPayload(newPass);
+    if (SendRawLine("[CHANGE]:" + newUser + ":" + encPass + "\n") < 0) {
         state_.SetCredentialChangePending(false);
         QueueAutoLogin("", "");
-        state_.SetLastError("No se pudo enviar el cambio inicial de credenciales.");
+        state_.SetLastError("Could not send the initial credential change.");
         state_.SetStatusDetail("Sin enlace activo hacia el servidor.");
         return false;
     }
@@ -165,7 +188,7 @@ bool ChatClient::SendFirstLoginChange(const std::string& newUser, const std::str
 
 bool ChatClient::SendPing() {
     if (SendRawLine("PING\n") < 0) {
-        state_.SetLastError("No se pudo enviar PING al servidor.");
+        state_.SetLastError("Could not send PING to the server.");
         return false;
     }
     return true;
@@ -173,16 +196,16 @@ bool ChatClient::SendPing() {
 
 bool ChatClient::SendChatMessage(const std::string& user, const std::string& input) {
     if (!SendEncryptedPayload(user, input)) {
-        state_.SetLastError("No se pudo enviar el mensaje. Canal no disponible.");
+        state_.SetLastError("Could not send the message. Channel unavailable.");
         return false;
     }
     return true;
 }
 
 bool ChatClient::SendPrivateMessage(const std::string& fromUser, const std::string& target, const std::string& message) {
-    std::string enc = AESHelper::Encrypt(message, river::EncryptionKey(), "");
+    std::string enc = river::SealPayload(message);
     if (SendRawLine("[PM]:" + target + ":" + fromUser + ":" + enc + "\n") < 0) {
-        state_.SetLastError("No se pudo enviar el mensaje privado.");
+        state_.SetLastError("Could not send the private message.");
         return false;
     }
     return true;
@@ -194,11 +217,11 @@ bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDra
         return false;
     }
     if (attachment.localPath.empty() || attachment.displayName.empty()) {
-        state_.SetLastError("Adjunto invalido.");
+        state_.SetLastError("Invalid attachment.");
         return false;
     }
     if (attachment.sizeBytes > kMaxAttachmentBytes) {
-        state_.SetLastError("Adjunto demasiado grande. Limite actual: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".");
+        state_.SetLastError("Attachment too large. Current limit: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".");
         return false;
     }
 
@@ -211,22 +234,20 @@ bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDra
     const std::string kind =
         attachment.kind == AttachmentKind::Image ? "image" :
         attachment.kind == AttachmentKind::Video ? "video" : "file";
-    const std::string encOffer = AESHelper::Encrypt(
+    const std::string encOffer = river::SealPayload(
         "@offer|" + id + "|" + kind + "|" +
             river::base64::EncodeString(attachment.displayName) + "|" +
             river::base64::EncodeString(attachment.mimeType) + "|" +
-            std::to_string(attachment.sizeBytes),
-        river::EncryptionKey(),
-        "");
+            std::to_string(attachment.sizeBytes));
 
     if (SendRawLine("[ATTACH]:" + encOffer + "\n") < 0) {
         std::lock_guard<std::mutex> lock(offeredAttachmentMutex_);
         offeredAttachments_.erase(id);
-        state_.SetLastError("No se pudo anunciar el adjunto.");
+        state_.SetLastError("Could not announce the attachment.");
         return false;
     }
 
-    state_.SetStatusDetail("Adjunto anunciado: " + attachment.displayName);
+    state_.SetStatusDetail("Attachment announced: " + attachment.displayName);
     state_.ClearLastError();
     return true;
 }
@@ -266,8 +287,8 @@ bool ChatClient::HandleAttachmentBroadcast(const std::string& line) {
 
     const std::string sender = rest.substr(0, sep);
     const std::string encPayload = rest.substr(sep + 1);
-    const std::string payload = AESHelper::Decrypt(encPayload, river::EncryptionKey(), "");
-    if (payload.find("[DECRYPT_ERR]") != std::string::npos || payload.rfind("@offer|", 0) != 0) return true;
+    std::string payload;
+    if (!river::OpenPayload(encPayload, payload) || payload.rfind("@offer|", 0) != 0) return true;
 
     const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
     if (parts.size() < 6) return true;
@@ -300,7 +321,7 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
         auto it = offeredAttachments_.find(attachmentId);
         if (it == offeredAttachments_.end()) {
             SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-                river::base64::EncodeString("Adjunto no disponible."));
+                river::base64::EncodeString("Attachment unavailable."));
             return;
         }
         draft = it->second;
@@ -309,7 +330,7 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
     std::ifstream input(draft.localPath, std::ios::binary);
     if (!input.is_open()) {
         SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-            river::base64::EncodeString("No se pudo abrir el adjunto origen."));
+            river::base64::EncodeString("Could not open the source attachment."));
         return;
     }
 
@@ -354,14 +375,14 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
     std::vector<unsigned char> decoded;
     if (!river::base64::Decode(joined, decoded)) {
         state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
-        state_.SetLastError("No se pudo reconstruir el adjunto recibido.");
+        state_.SetLastError("Could not reconstruct the received attachment.");
         return;
     }
 
     std::ofstream output(transfer.targetPath, std::ios::binary);
     if (!output.is_open()) {
         state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
-        state_.SetLastError("No se pudo guardar el adjunto recibido.");
+        state_.SetLastError("Could not save the received attachment.");
         return;
     }
 
@@ -372,7 +393,7 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
                                  transfer.attachment.id,
                                  AttachmentTransferState::Received,
                                  transfer.targetPath);
-    state_.SetStatusDetail("Adjunto recibido: " + transfer.attachment.displayName);
+    state_.SetStatusDetail("Attachment received: " + transfer.attachment.displayName);
     state_.ClearLastError();
 }
 
@@ -448,7 +469,7 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
             incomingAttachments_.erase(sender + "|" + parts[1]);
         }
         state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
-        state_.SetLastError(errorText.empty() ? "No se pudo transferir el adjunto." : errorText);
+        state_.SetLastError(errorText.empty() ? "Could not transfer the attachment." : errorText);
         return true;
     }
 
@@ -493,13 +514,19 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             if (line == "PING") {
                 AppendClientLog("ReceiveLoop line=PING");
                 SendRawLine("PONG\n");
+            } else if (line.rfind("AUTH_CHALLENGE:", 0) == 0) {
+                AppendClientLog("ReceiveLoop line=AUTH_CHALLENGE");
+                if (!SendChallengeLogin(line)) {
+                    state_.SetAuthActionPending(false);
+                    state_.SetLastError("Could not complete authentication challenge.");
+                }
             } else if (line.find("FIRST LOGIN") != std::string::npos) {
                 AppendClientLog("ReceiveLoop line=FIRST LOGIN");
                 state_.SetAuthActionPending(false);
                 state_.SetCredentialChangePending(false);
                 state_.SetMustChangeCredentials(true);
                 state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
-                state_.SetStatusDetail("Primer acceso detectado. Debes cambiar ID y clave.");
+                state_.SetStatusDetail("First access detected. You must change ID and key.");
                 state_.ClearLastError();
             } else if (line.find("ACCESO CONCEDIDO") != std::string::npos) {
                 AppendClientLog("ReceiveLoop line=ACCESO CONCEDIDO");
@@ -564,8 +591,8 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
                 AppendClientLog("ReceiveLoop line=ERROR ACTUALIZANDO USUARIO");
                 state_.SetCredentialChangePending(false);
                 state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
-                state_.SetStatusDetail("No se pudo completar el cambio inicial.");
-                state_.SetLastError("No se pudo actualizar el usuario o la clave.");
+                state_.SetStatusDetail("Could not complete the initial update.");
+                state_.SetLastError("Could not update the user or key.");
                 state_.AddSystemLog("SYSTEM: ERROR ACTUALIZANDO USUARIO.");
             } else if (line.rfind("[ATTACH]:", 0) == 0) {
                 AppendClientLog("ReceiveLoop line=ATTACH_OFFER");
@@ -577,8 +604,8 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
                 if (sep != std::string::npos) {
                     const std::string sender = rest.substr(0, sep);
                     const std::string encPayload = rest.substr(sep + 1);
-                    const std::string dec = AESHelper::Decrypt(encPayload, river::EncryptionKey(), "");
-                    if (dec.find("[DECRYPT_ERR]") == std::string::npos && HandleAttachmentPrivateControl(sender, dec))
+                    std::string dec;
+                    if (river::OpenPayload(encPayload, dec) && HandleAttachmentPrivateControl(sender, dec))
                         continue;
                 }
                 state_.AddIncomingWireMessage(rest, CurrentUser(), true);
@@ -600,7 +627,7 @@ void ChatClient::NetworkLoop() {
             state_.SetConnectionState(ConnState::DISCONNECTED);
             state_.SetAuthenticated(false);
             state_.SetStatusDetail("Configura THE_RIVER_ONION y THE_RIVER_AES_KEY antes de conectar.");
-            state_.SetLastError("Falta configuracion privada local. No se usaran claves empotradas en la build.");
+            state_.SetLastError("Local private configuration is missing. Embedded build keys will not be used.");
             AppendClientLog("NetworkLoop missing private config");
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
@@ -619,16 +646,20 @@ void ChatClient::NetworkLoop() {
             river::OnionAddress(),
             static_cast<unsigned short>(river::kTorOnionPort)
         };
+        if (!IsTorProxyReachable(river::kTorProxyIp, river::kTorProxyPort)) {
+            AppendClientLog("NetworkLoop Tor proxy missing, attempting auto-start");
+            EnsureLocalTorIsRunning();
+        }
         SocketHandle sock = ConnectViaTor(endpoint);
         if (!IsSocketValid(sock)) {
             AppendClientLog("NetworkLoop ConnectViaTor failed");
             state_.SetConnectionState(ConnState::DISCONNECTED);
             if (IsTermuxEnvironment() && !IsTorProxyReachable(river::kTorProxyIp, river::kTorProxyPort)) {
-                state_.SetStatusDetail("No se detecto un proxy Tor local en 127.0.0.1:9050.");
+                state_.SetStatusDetail("No local Tor proxy detected at 127.0.0.1:9050.");
                 state_.SetLastError(
                     "En Termux debes iniciar tor antes del cliente. Ejecuta el script run_termux_client.sh con --start-tor o arranca tor manualmente.");
             } else {
-                state_.SetStatusDetail("No se pudo abrir un circuito onion hacia el servidor.");
+                state_.SetStatusDetail("Could not open an onion circuit to the server.");
                 state_.SetLastError("Tor no disponible o hidden service sin respuesta.");
             }
             for (int i = 0; i < 50 && !stopRequested_.load(); ++i)

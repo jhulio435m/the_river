@@ -47,6 +47,7 @@ bool RecvExact(SocketHandle sock, char* buffer, int totalBytes) {
 #include <unistd.h>
 #include <sys/types.h>
 #include <signal.h>
+#include <fcntl.h>
 #endif
 
 namespace {
@@ -121,6 +122,10 @@ bool PrepareTorBootstrap(const std::string& torExe) {
 }
 #else
 pid_t g_torPid = 0;
+
+bool FileExists(const std::string& path) {
+    return access(path.c_str(), F_OK) == 0;
+}
 #endif
 
 bool ProbeProxyListening(const std::string& ip, int port) {
@@ -176,8 +181,38 @@ bool EnsureLocalTorIsRunning() {
         return true;
     }
 #else
-    // Lógica similar para Linux usando fork/exec
-    AppendTorLog("Auto-deploy for Linux not yet implemented in this build.");
+    const std::string serverTorConfig = "tor_server_wsl.conf";
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int devNull = open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            dup2(devNull, STDIN_FILENO);
+            dup2(devNull, STDOUT_FILENO);
+            dup2(devNull, STDERR_FILENO);
+            if (devNull > STDERR_FILENO) close(devNull);
+        }
+
+        if (FileExists(serverTorConfig)) {
+            execlp("tor", "tor", "-f", serverTorConfig.c_str(), (char*)nullptr);
+        } else {
+            execlp("tor", "tor", "--SocksPort", "9050", "--DataDirectory", "tor_data", (char*)nullptr);
+        }
+        _exit(127);
+    }
+
+    if (pid <= 0) {
+        AppendTorLog("Linux Tor auto-start fork failed.");
+        return false;
+    }
+
+    g_torPid = pid;
+    AppendTorLog("Linux Tor process started pid=" + std::to_string(pid));
+    for (int i = 0; i < 30; ++i) {
+        if (ProbeProxyListening("127.0.0.1", 9050)) return true;
+        usleep(200000);
+    }
+    AppendTorLog("Linux Tor process did not expose SocksPort 9050 in time.");
 #endif
 
     return false;

@@ -44,7 +44,7 @@ bool UserRepository::EnsureDefaultAdminLocked() {
         "INSERT OR IGNORE INTO users (username, password_hash, first_login, hwid, is_admin) "
         "VALUES (?, ?, 0, NULL, 1);",
         -1, &st, nullptr);
-    std::string adminHash = HashPassword(river::AdminDefaultPassword());
+    std::string adminHash = MakePasswordHash(river::AdminDefaultPassword());
     const std::string adminUsername = river::AdminUsername();
     sqlite3_bind_text(st, 1, adminUsername.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 2, adminHash.c_str(), -1, SQLITE_TRANSIENT);
@@ -94,13 +94,37 @@ UserRecord UserRepository::FindUserByCredentials(const std::string& username, co
     if (db_ == nullptr) return record;
 
     sqlite3_stmt* st = nullptr;
-    std::string passwordHash = HashPassword(password);
     sqlite3_prepare_v2(
         db_,
-        "SELECT first_login, hwid, is_admin FROM users WHERE username=? AND password_hash=?;",
+        "SELECT password_hash, first_login, hwid, is_admin FROM users WHERE username=?;",
         -1, &st, nullptr);
     sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 2, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const unsigned char* hash = sqlite3_column_text(st, 0);
+        const std::string storedHash = hash ? reinterpret_cast<const char*>(hash) : "";
+        if (VerifyPasswordHash(password, storedHash)) {
+            record.found = true;
+            record.firstLogin = sqlite3_column_int(st, 1);
+            const unsigned char* hwid = sqlite3_column_text(st, 2);
+            record.hwid = hwid ? reinterpret_cast<const char*>(hwid) : "";
+            record.isAdmin = sqlite3_column_int(st, 3) == 1;
+        }
+    }
+    sqlite3_finalize(st);
+    return record;
+}
+
+UserRecord UserRepository::FindUserByUsername(const std::string& username) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    UserRecord record;
+    if (db_ == nullptr) return record;
+
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(
+        db_,
+        "SELECT first_login, hwid, is_admin FROM users WHERE username=?;",
+        -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(st) == SQLITE_ROW) {
         record.found = true;
         record.firstLogin = sqlite3_column_int(st, 0);
@@ -179,6 +203,28 @@ bool UserRepository::UserExistsLocked(const std::string& username) {
     return exists;
 }
 
+bool UserRepository::UserExists(const std::string& username) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr) return false;
+    return UserExistsLocked(username);
+}
+
+bool UserRepository::GetPasswordHash(const std::string& username, std::string& passwordHash) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr) return false;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_, "SELECT password_hash FROM users WHERE username=?;", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const unsigned char* hash = sqlite3_column_text(st, 0);
+        passwordHash = hash ? reinterpret_cast<const char*>(hash) : "";
+        found = !passwordHash.empty();
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
 std::string UserRepository::NextSequentialUsernameLocked() {
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(
@@ -199,7 +245,7 @@ bool UserRepository::CreateNextUser(std::string& createdUsername) {
 
     createdUsername = NextSequentialUsernameLocked();
     sqlite3_stmt* st = nullptr;
-    std::string passwordHash = HashPassword(river::DefaultUserPassword());
+    std::string passwordHash = MakePasswordHash(river::DefaultUserPassword());
     sqlite3_prepare_v2(
         db_,
         "INSERT INTO users (username, password_hash, first_login, hwid, is_admin) "
@@ -217,7 +263,7 @@ bool UserRepository::ResetUserPassword(const std::string& username, const std::s
     if (db_ == nullptr || username.empty() || newPassword.empty()) return false;
 
     sqlite3_stmt* st = nullptr;
-    std::string passwordHash = HashPassword(newPassword);
+    std::string passwordHash = MakePasswordHash(newPassword);
     sqlite3_prepare_v2(
         db_,
         "UPDATE users SET password_hash=?, first_login=0 WHERE username=?;",
@@ -237,7 +283,7 @@ bool UserRepository::CompleteFirstLogin(const std::string& oldUsername,
     if (newUsername != oldUsername && UserExistsLocked(newUsername)) return false;
 
     sqlite3_stmt* st = nullptr;
-    std::string passwordHash = HashPassword(newPassword);
+    std::string passwordHash = MakePasswordHash(newPassword);
     sqlite3_prepare_v2(
         db_,
         "UPDATE users SET username=?, password_hash=?, first_login=0 "

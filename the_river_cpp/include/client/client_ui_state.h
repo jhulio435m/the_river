@@ -11,6 +11,7 @@ struct ClientUiState {
     char newUser[32] = "";
     char newPass[32] = "";
     char attachPath[1024] = "";
+    bool spanishUi = false;
     bool autoScroll = true;
     bool usersPanelOpen = false;
     bool attachPickerOpen = false;

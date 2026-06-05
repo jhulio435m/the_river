@@ -51,6 +51,8 @@ private:
     void SetCurrentUser(const std::string& user);
     void QueueAutoLogin(const std::string& user, const std::string& pass);
     bool ConsumeQueuedAutoLogin(std::string& user, std::string& pass);
+    void QueueChallengeLogin(const std::string& user, const std::string& pass);
+    bool SendChallengeLogin(const std::string& nonce);
 
     ChatState& state_;
     std::atomic<bool> stopRequested_{false};
@@ -65,6 +67,8 @@ private:
     mutable std::mutex reloginMutex_;
     std::string queuedLoginUser_;
     std::string queuedLoginPass_;
+    std::string pendingLoginUser_;
+    std::string pendingLoginPass_;
 
     mutable std::mutex offeredAttachmentMutex_;
     std::map<std::string, AttachmentDraft> offeredAttachments_;
