@@ -800,7 +800,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         } else if (line.rfind("[ATTACH]:", 0) == 0) {
             AppendClientLog("ReceiveLoop line=ATTACH_OFFER");
             HandleAttachmentBroadcast(line);
-        } else if (line.find("[PM]:") == 0) {
+        } else if (line.rfind("[PM]:", 0) == 0) {
             AppendClientLog("ReceiveLoop line=PM");
             const std::string rest = line.substr(5);
             const std::size_t sep = rest.find(':');

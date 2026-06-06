@@ -94,6 +94,7 @@ jobs:
           --inline-suppr
           -I the_river_cpp/include
           --suppress=missingIncludeSystem
+          --suppress=*:*stb_image.h
           the_river_cpp/src the_river_cpp/server.cpp the_river_cpp/admin_console.cpp
 
   clang-tidy:
