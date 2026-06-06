@@ -124,15 +124,15 @@ void ReceiverLoop(SocketHandle sock) {
             continue;
         }
 
-        if (line.find("[[USERS]]:") == 0 || line.find("[USERS]:") == 0) {
+        if (line.rfind("[[USERS]]:", 0) == 0 || line.rfind("[USERS]:", 0) == 0) {
             continue;
         }
-        if (line.find("SESSION:") == 0) {
+        if (line.rfind("SESSION:", 0) == 0) {
             continue;
         }
 
         std::cout << "\r\033[K"; // Clear current line
-        if (line.find("[PM]:") == 0) {
+        if (line.rfind("[PM]:", 0) == 0) {
             std::string rest = line.substr(5);
             size_t sep = rest.find(':');
             std::string from = sep == std::string::npos ? rest : rest.substr(0, sep);
