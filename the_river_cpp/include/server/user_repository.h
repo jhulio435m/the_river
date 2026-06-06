@@ -36,6 +36,8 @@ public:
     bool GetPasswordHash(const std::string& username, std::string& passwordHash);
 
 private:
+    int SchemaVersionLocked();
+    bool SetSchemaVersionLocked(int version);
     bool ExecSQLLocked(const std::string& sql);
     bool EnsureDefaultAdminLocked();
     bool UserExistsLocked(const std::string& username);

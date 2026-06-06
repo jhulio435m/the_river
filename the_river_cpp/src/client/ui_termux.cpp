@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <chrono>
 #include <thread>
 
@@ -42,6 +43,38 @@ void PaceFrame(FrameClock::time_point frameStart, bool lowPowerMode) {
     std::this_thread::sleep_until(frameStart + frameBudget);
 }
 
+const char* GetClipboardTextTermux(void* user_data) {
+    static std::string clipboardCache;
+    clipboardCache.clear();
+    FILE* pipe = popen("termux-clipboard-get", "r");
+    if (pipe) {
+        char buffer[256];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            clipboardCache += buffer;
+        }
+        pclose(pipe);
+    }
+    if (clipboardCache.empty() && user_data != nullptr) {
+        GLFWwindow* window = static_cast<GLFWwindow*>(user_data);
+        const char* val = glfwGetClipboardString(window);
+        if (val) clipboardCache = val;
+    }
+    return clipboardCache.c_str();
+}
+
+void SetClipboardTextTermux(void* user_data, const char* text) {
+    if (!text) return;
+    if (user_data != nullptr) {
+        GLFWwindow* window = static_cast<GLFWwindow*>(user_data);
+        glfwSetClipboardString(window, text);
+    }
+    FILE* pipe = popen("termux-clipboard-set", "w");
+    if (pipe) {
+        fputs(text, pipe);
+        pclose(pipe);
+    }
+}
+
 void ConfigureTermuxUi(GLFWwindow* window) {
     ImGuiIO& io = ImGui::GetIO();
     const float uiScale = DetectUiScale(window);
@@ -51,6 +84,10 @@ void ConfigureTermuxUi(GLFWwindow* window) {
     if (!fontPath.empty()) {
         io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 22.0f * uiScale, nullptr, io.Fonts->GetGlyphRangesDefault());
     }
+
+    io.ClipboardUserData = window;
+    io.GetClipboardTextFn = GetClipboardTextTermux;
+    io.SetClipboardTextFn = SetClipboardTextTermux;
 }
 
 }

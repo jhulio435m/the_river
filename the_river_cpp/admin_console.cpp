@@ -56,21 +56,12 @@ void BootAnimation() {
     std::cout << "\033[0m\n";
 }
 
-void SendLine(SocketHandle sock, const std::string& msg) {
-    std::string full = msg + "\n";
-    send(sock, full.c_str(), (int)full.size(), 0);
+void SendAdminLine(SocketHandle sock, const std::string& msg) {
+    ::SendLine(sock, msg);
 }
 
 bool ReadProtocolLine(SocketHandle sock, std::string& line) {
-    line.clear();
-    char c = '\0';
-    while (true) {
-        int bytes = recv(sock, &c, 1, 0);
-        if (bytes <= 0) return false;
-        if (c == '\n') return true;
-        if (c != '\r') line.push_back(c);
-        if (line.size() > 65536) return false;
-    }
+    return RecvTextFrame(sock, line, 65536);
 }
 
 std::vector<std::string> SplitWhitespace(const std::string& input) {
@@ -124,47 +115,40 @@ std::string ReadSecretLine() {
 }
 
 void ReceiverLoop(SocketHandle sock) {
-    char buf[4096];
-    std::string accum;
     while (true) {
-        int bytes = recv(sock, buf, 4095, 0);
-        if (bytes <= 0) break;
-        buf[bytes] = '\0';
-        accum += buf;
+        std::string line;
+        if (!RecvTextFrame(sock, line, 65536)) break;
 
-        size_t pos = 0;
-        while ((pos = accum.find('\n')) != std::string::npos) {
-            std::string line = accum.substr(0, pos);
-            accum.erase(0, pos + 1);
+        if (line == "PING") {
+            SendAdminLine(sock, "PONG");
+            continue;
+        }
 
-            if (line == "PING") {
-                SendLine(sock, "PONG");
-                continue;
-            }
+        if (line.find("[[USERS]]:") == 0 || line.find("[USERS]:") == 0) {
+            continue;
+        }
+        if (line.find("SESSION:") == 0) {
+            continue;
+        }
 
-            if (line.find("[[USERS]]:") == 0 || line.find("[USERS]:") == 0) {
-                continue;
-            }
-
-            std::cout << "\r\033[K"; // Clear current line
-            if (line.find("[PM]:") == 0) {
-                std::string rest = line.substr(5);
-                size_t sep = rest.find(':');
-                std::string from = sep == std::string::npos ? rest : rest.substr(0, sep);
-                std::string enc = sep == std::string::npos ? "" : rest.substr(sep + 1);
-                std::string dec = DecryptWirePayload(enc);
-                std::cout << "\033[1;33m[PM de " << from << "]:\033[0m " << dec << "\n\033[1;32mADMIN>\033[0m " << std::flush;
-            } else if (line.find("SYSTEM") != std::string::npos) {
-                std::cout << "\033[1;31m" << line << "\033[0m\n\033[1;32mADMIN>\033[0m " << std::flush;
-            } else if (line.find(':') != std::string::npos) {
-                size_t sep = line.find(':');
-                std::string user = line.substr(0, sep);
-                std::string enc = line.substr(sep + 1);
-                std::string dec = DecryptWirePayload(enc);
-                std::cout << "\033[1;36m[" << user << "]:\033[0m " << dec << "\n\033[1;32mADMIN>\033[0m " << std::flush;
-            } else {
-                std::cout << line << "\n\033[1;32mADMIN>\033[0m " << std::flush;
-            }
+        std::cout << "\r\033[K"; // Clear current line
+        if (line.find("[PM]:") == 0) {
+            std::string rest = line.substr(5);
+            size_t sep = rest.find(':');
+            std::string from = sep == std::string::npos ? rest : rest.substr(0, sep);
+            std::string enc = sep == std::string::npos ? "" : rest.substr(sep + 1);
+            std::string dec = DecryptWirePayload(enc);
+            std::cout << "\033[1;33m[PM de " << from << "]:\033[0m " << dec << "\n\033[1;32mADMIN>\033[0m " << std::flush;
+        } else if (line.find("SYSTEM") != std::string::npos) {
+            std::cout << "\033[1;31m" << line << "\033[0m\n\033[1;32mADMIN>\033[0m " << std::flush;
+        } else if (line.find(':') != std::string::npos) {
+            size_t sep = line.find(':');
+            std::string user = line.substr(0, sep);
+            std::string enc = line.substr(sep + 1);
+            std::string dec = DecryptWirePayload(enc);
+            std::cout << "\033[1;36m[" << user << "]:\033[0m " << dec << "\n\033[1;32mADMIN>\033[0m " << std::flush;
+        } else {
+            std::cout << line << "\n\033[1;32mADMIN>\033[0m " << std::flush;
         }
     }
 
@@ -208,7 +192,7 @@ int main() {
     }
 
     const std::string hwid = MakeStableMachineId();
-    SendLine(adminSocket, "[LOGIN_INIT]:" + adminUser + ":" + hwid);
+    SendAdminLine(adminSocket, "[LOGIN_INIT]:" + adminUser + ":" + hwid);
     
     std::string challenge;
     bool gotChallenge = false;
@@ -246,7 +230,7 @@ int main() {
         return 1;
     }
     const std::string proof = HmacSha256Hex(verifier, challengeParts[1] + "|" + adminUser + "|" + hwid);
-    SendLine(adminSocket, "[LOGIN_PROOF]:" + adminUser + ":" + hwid + ":" + proof);
+    SendAdminLine(adminSocket, "[LOGIN_PROOF]:" + adminUser + ":" + hwid + ":" + proof);
 
     std::thread receiver(ReceiverLoop, adminSocket);
 
@@ -274,7 +258,7 @@ int main() {
         }
 
         std::string enc = river::SealPayload(input);
-        SendLine(adminSocket, adminUser + ":" + enc);
+        SendAdminLine(adminSocket, adminUser + ":" + enc);
         std::cout << "\033[1;32mADMIN>\033[0m ";
     }
 

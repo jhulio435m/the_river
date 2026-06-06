@@ -35,6 +35,7 @@ private:
         std::string targetPath;
         int totalChunks = 0;
         int receivedChunks = 0;
+        bool binaryChunks = true;
         std::vector<std::string> chunks;
     };
 
@@ -44,7 +45,13 @@ private:
     bool SendEncryptedPayload(const std::string& user, const std::string& payload);
     bool HandleAttachmentBroadcast(const std::string& line);
     bool HandleAttachmentPrivateControl(const std::string& sender, const std::string& payload);
+    bool HandleAttachmentChunkFrame(const std::string& payload);
     void HandleAttachmentRequest(const std::string& requester, const std::string& attachmentId, const std::string& mode);
+    bool SendAttachmentChunkFrame(const std::string& target,
+                                  const std::string& attachmentId,
+                                  int index,
+                                  int totalChunks,
+                                  const std::string& encryptedChunk);
     void FinishIncomingAttachment(IncomingAttachmentTransfer transfer);
     void CloseCurrentSocket();
     std::string CurrentUser() const;

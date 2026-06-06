@@ -4,6 +4,8 @@ C++ chat suite with Tor transport, ImGui client, admin console, SQLite user stor
 
 This repository is now scoped to the C++ implementation. The previous VB client/server artifacts and bundled Tor identity files were removed so the next repository can start clean.
 
+Current builds use a binary frame transport between client, admin console, and server. Older line-delimited clients are not protocol-compatible. Attachment payloads are streamed as encrypted binary chunks instead of base64 text messages.
+
 ## Layout
 
 - `the_river_cpp/src/client/`: GUI client, chat state, attachments, and platform adapters.

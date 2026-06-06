@@ -38,3 +38,4 @@ struct AttachmentPayload {
 
 constexpr std::size_t kMaxAttachmentBytes = 12 * 1024 * 1024;
 constexpr std::size_t kAttachmentChunkChars = 2048;
+constexpr std::size_t kAttachmentBinaryChunkBytes = 32 * 1024;

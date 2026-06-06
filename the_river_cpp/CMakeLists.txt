@@ -21,6 +21,7 @@ add_library(river_common STATIC
     src/common/secure_envelope.cpp
     src/common/security_utils.cpp
     src/common/shared_config.cpp
+    src/common/net_transport.cpp
     src/common/tor_connection.cpp
 )
 target_include_directories(river_common PUBLIC
@@ -55,13 +56,28 @@ target_include_directories(the_river_admin PRIVATE
 )
 target_link_libraries(the_river_admin PRIVATE river_common)
 
+if(DEFINED ENV{TERMUX_VERSION} OR DEFINED ENV{PREFIX} AND ENV{PREFIX} MATCHES "com.termux")
+    message(STATUS "Configuring build for Termux environment")
+    set(CLIENT_ENTRY_SRC src/client/ui_termux.cpp)
+    set(CLIENT_PLATFORM_SRCS
+        src/client/file_picker_termux.cpp
+        src/client/platform_open_termux.cpp
+    )
+else()
+    message(STATUS "Configuring build for Linux Desktop environment")
+    set(CLIENT_ENTRY_SRC src/client/ui_glfw.cpp)
+    set(CLIENT_PLATFORM_SRCS
+        src/client/file_picker_linux.cpp
+    )
+endif()
+
 add_library(river_client_core STATIC
     src/client/app_ui.cpp
     src/client/attachment_utils.cpp
     src/client/chat_client.cpp
     src/client/chat_state.cpp
     src/client/command_processor.cpp
-    src/client/file_picker_linux.cpp
+    ${CLIENT_PLATFORM_SRCS}
     src/client/image_preview_linux.cpp
     src/client/platform_runtime.cpp
     src/client/ui_sections.cpp
@@ -95,7 +111,7 @@ target_link_libraries(river_client_core PUBLIC
     ${CMAKE_DL_LIBS}
 )
 
-add_executable(the_river_client src/client/ui_glfw.cpp)
+add_executable(the_river_client ${CLIENT_ENTRY_SRC})
 target_link_libraries(the_river_client PRIVATE river_client_core)
 
 enable_testing()
@@ -105,3 +121,9 @@ add_executable(river_unit_tests
 )
 target_link_libraries(river_unit_tests PRIVATE river_common)
 add_test(NAME river_unit_tests COMMAND river_unit_tests)
+
+add_executable(river_integration_tests
+    tests/integration_tests.cpp
+)
+target_link_libraries(river_integration_tests PRIVATE river_server_core)
+add_test(NAME river_integration_tests COMMAND river_integration_tests)

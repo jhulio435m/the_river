@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <ctime>
+#include <cstdio>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -19,6 +21,9 @@ constexpr std::size_t kMaxLineBytes = 65536;
 constexpr std::size_t kMaxChatPayloadBytes = 8192;
 constexpr std::size_t kMaxAttachmentControlBytes = 16384;
 constexpr int kLoginChallengeTtlSeconds = 60;
+constexpr int kMaxLinesPerMinute = 120;
+constexpr int kMaxMessagesPerMinute = 60;
+constexpr int kMaxAttachmentsPerMinute = 12;
 
 bool StartsWith(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
@@ -42,26 +47,82 @@ std::string ChallengeSpecFromPasswordHash(const std::string& storedHash) {
     return parts[0] + "$" + parts[1] + "$" + parts[2];
 }
 
+std::string JsonEscape(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (unsigned char c : value) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[7] = {};
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    return out;
+}
+
+void AppendU16(std::string& out, std::uint16_t value) {
+    out.push_back(static_cast<char>((value >> 8) & 0xff));
+    out.push_back(static_cast<char>(value & 0xff));
+}
+
+void AppendU32(std::string& out, std::uint32_t value) {
+    out.push_back(static_cast<char>((value >> 24) & 0xff));
+    out.push_back(static_cast<char>((value >> 16) & 0xff));
+    out.push_back(static_cast<char>((value >> 8) & 0xff));
+    out.push_back(static_cast<char>(value & 0xff));
+}
+
+bool ReadU16(const std::string& input, std::size_t& offset, std::uint16_t& value) {
+    if (offset + 2 > input.size()) return false;
+    value = static_cast<std::uint16_t>(
+        (static_cast<unsigned char>(input[offset]) << 8) |
+        static_cast<unsigned char>(input[offset + 1]));
+    offset += 2;
+    return true;
+}
+
+bool ReadU32(const std::string& input, std::size_t& offset, std::uint32_t& value) {
+    if (offset + 4 > input.size()) return false;
+    value = (static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset])) << 24) |
+            (static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset + 1])) << 16) |
+            (static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset + 2])) << 8) |
+            static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset + 3]));
+    offset += 4;
+    return true;
+}
+
+bool ReadSizedString(const std::string& input, std::size_t& offset, std::string& value) {
+    std::uint16_t size = 0;
+    if (!ReadU16(input, offset, size) || offset + size > input.size()) return false;
+    value.assign(input.data() + offset, size);
+    offset += size;
+    return true;
+}
+
+void AppendSizedString(std::string& out, const std::string& value) {
+    AppendU16(out, static_cast<std::uint16_t>(value.size()));
+    out.append(value);
+}
+
 }
 
 ChatServer::ChatServer(const std::string& dbPath, const std::string& logPath)
     : dbPath_(dbPath), logPath_(logPath) {}
 
 bool ChatServer::SendLine(SocketHandle sock, const std::string& msg) {
-    std::string full = msg + "\n";
-    std::size_t totalSent = 0;
-    while (totalSent < full.size()) {
-        int sent = send(sock,
-                        full.c_str() + totalSent,
-                        static_cast<int>(full.size() - totalSent),
-                        0);
-        if (sent <= 0) {
-            LogRuntime("NET", "send failed on socket " + std::to_string(sock));
-            return false;
-        }
-        totalSent += static_cast<std::size_t>(sent);
-    }
-    return true;
+    const bool ok = ::SendLine(sock, msg);
+    if (!ok) LogRuntime("NET", "send failed on socket " + std::to_string(sock));
+    return ok;
 }
 
 void ChatServer::LogEncryptedMessage(const std::string& user, const std::string& encryptedPayload) {
@@ -88,6 +149,12 @@ void ChatServer::LogRuntime(const std::string& category, const std::string& mess
     std::ofstream f("server_runtime.log", std::ios::app);
     if (f.is_open()) {
         f << ts << " " << entry << "\n";
+    }
+    std::ofstream jf("server_runtime.jsonl", std::ios::app);
+    if (jf.is_open()) {
+        jf << "{\"ts\":\"" << ts
+           << "\",\"category\":\"" << JsonEscape(category)
+           << "\",\"message\":\"" << JsonEscape(message) << "\"}\n";
     }
 }
 
@@ -128,6 +195,44 @@ bool ChatServer::SendPrivateMessage(const std::string& toNick, const std::string
     return false;
 }
 
+bool ChatServer::RelayAttachmentChunk(const std::string& fromNick, const std::string& payload) {
+    std::size_t offset = 0;
+    std::string target;
+    std::string attachmentId;
+    std::uint32_t index = 0;
+    std::uint32_t totalChunks = 0;
+    if (!ReadSizedString(payload, offset, target) ||
+        !ReadSizedString(payload, offset, attachmentId) ||
+        !ReadU32(payload, offset, index) ||
+        !ReadU32(payload, offset, totalChunks) ||
+        !IsValidUsername(target) ||
+        attachmentId.empty() ||
+        attachmentId.size() > 80 ||
+        totalChunks == 0 ||
+        index >= totalChunks ||
+        offset >= payload.size()) {
+        return false;
+    }
+
+    const std::string encryptedChunk = payload.substr(offset);
+    if (encryptedChunk.size() > 64 * 1024) return false;
+
+    std::string outbound;
+    AppendSizedString(outbound, fromNick);
+    AppendSizedString(outbound, attachmentId);
+    AppendU32(outbound, index);
+    AppendU32(outbound, totalChunks);
+    outbound.append(encryptedChunk);
+
+    std::lock_guard<std::mutex> lk(clientsMutex_);
+    for (auto& [sock, cl] : clients_) {
+        if (cl.auth && cl.nick == target) {
+            return SendFrame(sock, kFrameTypeAttachmentChunk, outbound);
+        }
+    }
+    return false;
+}
+
 void ChatServer::AuditAdminAction(const std::string& admin, const std::string& action, const std::string& detail) {
     std::lock_guard<std::mutex> lk(logMutex_);
     std::ofstream f("admin_audit.log", std::ios::app);
@@ -136,6 +241,13 @@ void ChatServer::AuditAdminAction(const std::string& admin, const std::string& a
     std::time_t now = std::time(nullptr);
     std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
     f << ts << "|" << admin << "|" << action << "|" << detail << "\n";
+    std::ofstream jf("admin_audit.jsonl", std::ios::app);
+    if (jf.is_open()) {
+        jf << "{\"ts\":\"" << ts
+           << "\",\"admin\":\"" << JsonEscape(admin)
+           << "\",\"action\":\"" << JsonEscape(action)
+           << "\",\"detail\":\"" << JsonEscape(detail) << "\"}\n";
+    }
 }
 
 bool ChatServer::KickUser(const std::string& nick, const std::string& reason) {
@@ -422,41 +534,57 @@ void ChatServer::HeartbeatLoop() {
 }
 
 void ChatServer::HandleClient(SocketHandle clientSocket) {
-    char buffer[65536];
-    std::string accum;
     std::string currentNick;
     std::string currentHwid;
     bool authed = false;
     bool isAdmin = false;
     bool firstLoginPending = false;
+    std::string sessionId;
     std::string pendingLoginUser;
     std::string pendingLoginHwid;
     std::string pendingLoginNonce;
     time_t pendingLoginIssuedAt = 0;
+    time_t rateWindowStart = time(nullptr);
+    int linesInWindow = 0;
+    int messagesInWindow = 0;
+    int attachmentsInWindow = 0;
+    bool closeForRateLimit = false;
+
+    auto resetRateWindowIfNeeded = [&]() {
+        const time_t now = time(nullptr);
+        if (now - rateWindowStart >= 60) {
+            rateWindowStart = now;
+            linesInWindow = 0;
+            messagesInWindow = 0;
+            attachmentsInWindow = 0;
+        }
+    };
 
     SendLine(clientSocket, "SYSTEM: UPLINK ESTABLISHED.");
 
     while (true) {
-        int bytes = recv(clientSocket, buffer, 65535, 0);
-        if (bytes <= 0) break;
-
-        buffer[bytes] = '\0';
-        accum += buffer;
-        if (accum.size() > 1024 * 1024) {
-            accum.clear();
+        std::uint16_t frameType = 0;
+        std::string raw;
+        if (!RecvFrame(clientSocket, frameType, raw, 1024 * 1024)) break;
+        resetRateWindowIfNeeded();
+        if (frameType == kFrameTypeAttachmentChunk) {
+            if (!authed || ++attachmentsInWindow > kMaxAttachmentsPerMinute || !RelayAttachmentChunk(currentNick, raw)) {
+                SendLine(clientSocket, "SYSTEM: ADJUNTO RECHAZADO.");
+            }
             continue;
         }
-
-        size_t pos = 0;
-        while ((pos = accum.find('\n')) != std::string::npos) {
-            std::string raw = accum.substr(0, pos);
-            accum.erase(0, pos + 1);
-            raw.erase(std::remove(raw.begin(), raw.end(), '\r'), raw.end());
-            if (raw.empty()) continue;
-            if (raw.size() > kMaxLineBytes) {
-                SendLine(clientSocket, "SYSTEM: LINEA DEMASIADO GRANDE.");
-                continue;
-            }
+        if (frameType != kFrameTypeText) continue;
+        raw.erase(std::remove(raw.begin(), raw.end(), '\r'), raw.end());
+        if (raw.empty()) continue;
+        if (++linesInWindow > kMaxLinesPerMinute) {
+            SendLine(clientSocket, "SYSTEM: LIMITE DE TRAFICO EXCEDIDO.");
+            closeForRateLimit = true;
+            break;
+        }
+        if (raw.size() > kMaxLineBytes) {
+            SendLine(clientSocket, "SYSTEM: LINEA DEMASIADO GRANDE.");
+            continue;
+        }
 
             if (authed) {
                 std::lock_guard<std::mutex> lk(clientsMutex_);
@@ -517,15 +645,18 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 if (login.code == LoginCode::FirstLogin) {
                     SendLine(clientSocket, "SYSTEM: FIRST LOGIN. CHANGE REQUIRED.");
                     currentNick = user;
+                    sessionId = RandomHex(16);
                     firstLoginPending = true;
                 } else if (login.code == LoginCode::Ok) {
                     SendLine(clientSocket, "SYSTEM: ACCESO CONCEDIDO.");
                     currentNick = user;
+                    sessionId = RandomHex(16);
+                    SendLine(clientSocket, "SESSION:" + sessionId);
                     authed = true;
                     firstLoginPending = false;
                     {
                         std::lock_guard<std::mutex> lk(clientsMutex_);
-                        clients_[clientSocket] = {clientSocket, user, hwid, true, isAdmin, time(nullptr)};
+                        clients_[clientSocket] = {clientSocket, user, hwid, sessionId, true, isAdmin, time(nullptr)};
                     }
                     Broadcast(user + " se unió");
                     BroadcastUsers();
@@ -548,26 +679,36 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                     SendLine(clientSocket, "SYSTEM: ERROR ACTUALIZANDO USUARIO.");
                 } else if (repo_.CompleteFirstLogin(currentNick, newUser, newPass)) {
                     currentNick = newUser;
+                    sessionId = RandomHex(16);
                     authed = true;
                     firstLoginPending = false;
                     {
                         std::lock_guard<std::mutex> lk(clientsMutex_);
-                        clients_[clientSocket] = {clientSocket, newUser, currentHwid, true, false, time(nullptr)};
+                        clients_[clientSocket] = {clientSocket, newUser, currentHwid, sessionId, true, false, time(nullptr)};
                     }
                     SendLine(clientSocket, "SYSTEM: ACTUALIZADO.");
                     SendLine(clientSocket, "SYSTEM: ACCESO CONCEDIDO.");
+                    SendLine(clientSocket, "SESSION:" + sessionId);
                     Broadcast(newUser + " se unió");
                     BroadcastUsers();
                 } else {
                     SendLine(clientSocket, "SYSTEM: ERROR ACTUALIZANDO USUARIO.");
                 }
             } else if (StartsWith(raw, "[ATTACH]:") && authed) {
+                if (++attachmentsInWindow > kMaxAttachmentsPerMinute) {
+                    SendLine(clientSocket, "SYSTEM: LIMITE DE ADJUNTOS EXCEDIDO.");
+                    continue;
+                }
                 if (raw.size() > kMaxAttachmentControlBytes) {
                     SendLine(clientSocket, "SYSTEM: ADJUNTO RECHAZADO POR TAMANO.");
                     continue;
                 }
                 Broadcast("[ATTACH]:" + currentNick + ":" + raw.substr(9));
             } else if (StartsWith(raw, "[PM]:") && authed) {
+                if (++messagesInWindow > kMaxMessagesPerMinute) {
+                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
+                    continue;
+                }
                 std::string rest = raw.substr(5);
                 size_t firstSep = rest.find(':');
                 if (firstSep == std::string::npos) continue;
@@ -583,6 +724,10 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 if (!SendPrivateMessage(target, currentNick, encPayload))
                     SendLine(clientSocket, "SYSTEM: Usuario '" + target + "' no encontrado.");
             } else if (authed && isAdmin) {
+                if (++messagesInWindow > kMaxMessagesPerMinute) {
+                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
+                    continue;
+                }
                 std::string payload = raw;
                 size_t sep = raw.find(':');
                 if (sep != std::string::npos) payload = raw.substr(sep + 1);
@@ -607,6 +752,10 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                     SendLine(clientSocket, "SYSTEM: MENSAJE RECHAZADO POR AUTENTICACION.");
                 }
             } else if (authed) {
+                if (++messagesInWindow > kMaxMessagesPerMinute) {
+                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
+                    continue;
+                }
                 std::string payload = raw;
                 size_t sep = raw.find(':');
                 if (sep != std::string::npos) payload = raw.substr(sep + 1);
@@ -622,7 +771,7 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 LogEncryptedMessage(currentNick, payload);
                 Broadcast(currentNick + ":" + payload);
             }
-        }
+        if (closeForRateLimit) break;
     }
 
     {

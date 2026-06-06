@@ -6,10 +6,44 @@ on:
       - main
       - master
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  linux:
-    name: Linux build and tests
+  build:
+    name: Linux ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            cppcheck \
+            libgl1-mesa-dev \
+            libglfw3-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Configure
+        run: cmake -S the_river_cpp -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizer:
+    name: Linux ASan UBSan
     runs-on: ubuntu-latest
 
     steps:
@@ -28,10 +62,68 @@ jobs:
             pkg-config
 
       - name: Configure
-        run: cmake -S the_river_cpp -B build -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -S the_river_cpp -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
       - name: Build
         run: cmake --build build --parallel
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: LSAN_OPTIONS=detect_leaks=0 ctest --test-dir build --output-on-failure
+
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      - name: cppcheck
+        run: >
+          cppcheck --enable=warning,performance,portability
+          --error-exitcode=1
+          --inline-suppr
+          -I the_river_cpp/include
+          --suppress=missingIncludeSystem
+          the_river_cpp/src the_river_cpp/server.cpp the_river_cpp/admin_console.cpp
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang-tidy \
+            cmake \
+            libgl1-mesa-dev \
+            libglfw3-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Configure
+        run: cmake -S the_river_cpp -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: clang-tidy core
+        run: >
+          clang-tidy
+          -p build
+          the_river_cpp/src/common/*.cpp
+          the_river_cpp/src/server/*.cpp
+          the_river_cpp/server.cpp

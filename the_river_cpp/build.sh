@@ -30,7 +30,7 @@ CXX_BIN="${CXX:-g++}"
 check_dependency "$CC_BIN"
 check_dependency "$CXX_BIN"
 
-COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/shared_config.cpp src/common/tor_connection.cpp src/common/base64.cpp"
+COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/shared_config.cpp src/common/net_transport.cpp src/common/tor_connection.cpp src/common/base64.cpp"
 SERVER_SRC="src/server/user_repository.cpp src/server/chat_server.cpp server.cpp"
 ADMIN_SRC="admin_console.cpp"
 RUNTIME_SRC="src/client/platform_runtime.cpp"

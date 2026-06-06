@@ -489,8 +489,11 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
                 std::string savePath;
                 std::string saveError;
                 if (PickAttachmentSavePath(attachment, savePath, saveError)) {
-                    if (!CopyFileBinary(attachment.localPath, savePath, saveError))
+                    if (!CopyFileBinary(attachment.localPath, savePath, saveError)) {
                         uiState.attachmentModalError = saveError;
+                    } else {
+                        state.AddSystemLog("SYSTEM: Attachment saved to " + savePath);
+                    }
                 } else if (!saveError.empty()) {
                     uiState.attachmentModalError = saveError;
                 }

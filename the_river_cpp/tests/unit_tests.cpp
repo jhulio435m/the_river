@@ -1,12 +1,18 @@
 #include <cassert>
+#include <cerrno>
 #include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include "common/base64.h"
+#include "common/net_platform.h"
 #include "common/secure_envelope.h"
 #include "common/security_utils.h"
+
+#ifndef _WIN32
+#include <sys/socket.h>
+#endif
 
 namespace {
 
@@ -70,6 +76,45 @@ void TestSecureEnvelopeRoundTrip() {
     std::string tampered = sealed;
     tampered.back() = tampered.back() == 'A' ? 'B' : 'A';
     assert(!river::OpenPayload(tampered, opened));
+
+    const std::string binaryPlain("abc\0def", 7);
+    const std::string binarySealed = river::SealPayloadBinary(binaryPlain);
+    assert(binarySealed.rfind("RV4", 0) == 0);
+    std::string binaryOpened;
+    assert(river::OpenPayloadBinary(binarySealed, binaryOpened));
+    assert(binaryOpened == binaryPlain);
+}
+
+void TestBinaryFrameRoundTrip() {
+#ifndef _WIN32
+    int sockets[2] = {-1, -1};
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+
+    const std::string payload = "frame payload without newline";
+    const bool sent = SendTextFrame(sockets[0], payload);
+    if (!sent && errno == EPERM) {
+        std::cerr << "skipping frame socket test: send blocked by sandbox\n";
+        CloseSocketHandle(sockets[0]);
+        CloseSocketHandle(sockets[1]);
+        return;
+    }
+    assert(sent);
+
+    std::string received;
+    assert(RecvTextFrame(sockets[1], received, 1024));
+    assert(received == payload);
+
+    const std::string binaryPayload("bin\0payload", 11);
+    assert(SendFrame(sockets[0], kFrameTypeAttachmentChunk, binaryPayload));
+    std::uint16_t frameType = 0;
+    std::string framePayload;
+    assert(RecvFrame(sockets[1], frameType, framePayload, 1024));
+    assert(frameType == kFrameTypeAttachmentChunk);
+    assert(framePayload == binaryPayload);
+
+    CloseSocketHandle(sockets[0]);
+    CloseSocketHandle(sockets[1]);
+#endif
 }
 
 }  // namespace
@@ -81,6 +126,7 @@ int main() {
     TestPasswordVerifier();
     TestValidationRules();
     TestSecureEnvelopeRoundTrip();
+    TestBinaryFrameRoundTrip();
 
     std::cout << "river_unit_tests passed\n";
     return 0;

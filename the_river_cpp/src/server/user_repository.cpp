@@ -37,6 +37,21 @@ bool UserRepository::ExecSQLLocked(const std::string& sql) {
     return true;
 }
 
+int UserRepository::SchemaVersionLocked() {
+    sqlite3_stmt* st = nullptr;
+    int version = 0;
+    if (sqlite3_prepare_v2(db_, "PRAGMA user_version;", -1, &st, nullptr) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        version = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    return version;
+}
+
+bool UserRepository::SetSchemaVersionLocked(int version) {
+    return ExecSQLLocked("PRAGMA user_version = " + std::to_string(version) + ";");
+}
+
 bool UserRepository::EnsureDefaultAdminLocked() {
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(
@@ -57,6 +72,8 @@ bool UserRepository::InitSchema() {
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ == nullptr) return false;
 
+    if (!ExecSQLLocked("BEGIN IMMEDIATE;")) return false;
+
     if (!ExecSQLLocked(
             "CREATE TABLE IF NOT EXISTS users ("
             "username TEXT PRIMARY KEY,"
@@ -64,28 +81,48 @@ bool UserRepository::InitSchema() {
             "first_login INTEGER DEFAULT 1,"
             "hwid TEXT,"
             "is_admin INTEGER DEFAULT 0"
-            ");")) return false;
+            ");")) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
+    }
 
     if (!ExecSQLLocked(
             "CREATE TABLE IF NOT EXISTS banned_hwids ("
             "hwid TEXT PRIMARY KEY,"
             "reason TEXT,"
             "banned_at INTEGER"
-            ");")) return false;
-
-    char* alterErr = nullptr;
-    int alterRc = sqlite3_exec(db_, "ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0;", nullptr, nullptr, &alterErr);
-    if (alterRc != SQLITE_OK && alterErr != nullptr) {
-        std::string msg = alterErr;
-        if (msg.find("duplicate column name") == std::string::npos) {
-            std::cerr << "[DB] " << msg << std::endl;
-            sqlite3_free(alterErr);
-            return false;
-        }
-        sqlite3_free(alterErr);
+            ");")) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
     }
 
-    return EnsureDefaultAdminLocked();
+    const int schemaVersion = SchemaVersionLocked();
+    if (schemaVersion < 1) {
+        char* alterErr = nullptr;
+        int alterRc = sqlite3_exec(db_, "ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0;", nullptr, nullptr, &alterErr);
+        if (alterRc != SQLITE_OK) {
+            std::string msg = alterErr != nullptr ? alterErr : "unknown alter table error";
+            if (alterErr != nullptr) sqlite3_free(alterErr);
+            if (msg.find("duplicate column name") == std::string::npos) {
+                std::cerr << "[DB] " << msg << std::endl;
+                ExecSQLLocked("ROLLBACK;");
+                return false;
+            }
+        } else if (alterErr != nullptr) {
+            sqlite3_free(alterErr);
+        }
+
+        if (!SetSchemaVersionLocked(1)) {
+            ExecSQLLocked("ROLLBACK;");
+            return false;
+        }
+    }
+
+    if (!EnsureDefaultAdminLocked()) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
+    }
+    return ExecSQLLocked("COMMIT;");
 }
 
 UserRecord UserRepository::FindUserByCredentials(const std::string& username, const std::string& password) {

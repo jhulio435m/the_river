@@ -4,12 +4,15 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <mutex>
 #include <sstream>
 #include <vector>
+
+#include <openssl/evp.h>
 
 #include "client/attachment_utils.h"
 #include "client/platform_runtime.h"
@@ -48,6 +51,85 @@ std::vector<std::string> SplitByDelimiter(const std::string& value, char delimit
 std::string BytesToString(const std::vector<unsigned char>& bytes) {
     if (bytes.empty()) return "";
     return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+std::string BytesToHex(const unsigned char* data, std::size_t size) {
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    out.reserve(size * 2);
+    for (std::size_t i = 0; i < size; ++i) {
+        out.push_back(hex[(data[i] >> 4) & 0x0f]);
+        out.push_back(hex[data[i] & 0x0f]);
+    }
+    return out;
+}
+
+std::string HashFileSha256(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) return "";
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (ctx == nullptr) return "";
+
+    std::vector<char> buffer(kAttachmentBinaryChunkBytes);
+    bool ok = EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1;
+    while (ok && input.good()) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize got = input.gcount();
+        if (got > 0) {
+            ok = EVP_DigestUpdate(ctx, buffer.data(), static_cast<std::size_t>(got)) == 1;
+        }
+    }
+
+    unsigned char digest[EVP_MAX_MD_SIZE] = {};
+    unsigned int digestLen = 0;
+    ok = ok && EVP_DigestFinal_ex(ctx, digest, &digestLen) == 1;
+    EVP_MD_CTX_free(ctx);
+    return ok ? BytesToHex(digest, digestLen) : "";
+}
+
+void AppendU16(std::string& out, std::uint16_t value) {
+    out.push_back(static_cast<char>((value >> 8) & 0xff));
+    out.push_back(static_cast<char>(value & 0xff));
+}
+
+void AppendU32(std::string& out, std::uint32_t value) {
+    out.push_back(static_cast<char>((value >> 24) & 0xff));
+    out.push_back(static_cast<char>((value >> 16) & 0xff));
+    out.push_back(static_cast<char>((value >> 8) & 0xff));
+    out.push_back(static_cast<char>(value & 0xff));
+}
+
+bool ReadU16(const std::string& input, std::size_t& offset, std::uint16_t& value) {
+    if (offset + 2 > input.size()) return false;
+    value = static_cast<std::uint16_t>(
+        (static_cast<unsigned char>(input[offset]) << 8) |
+        static_cast<unsigned char>(input[offset + 1]));
+    offset += 2;
+    return true;
+}
+
+bool ReadU32(const std::string& input, std::size_t& offset, std::uint32_t& value) {
+    if (offset + 4 > input.size()) return false;
+    value = (static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset])) << 24) |
+            (static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset + 1])) << 16) |
+            (static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset + 2])) << 8) |
+            static_cast<std::uint32_t>(static_cast<unsigned char>(input[offset + 3]));
+    offset += 4;
+    return true;
+}
+
+bool ReadSizedString(const std::string& input, std::size_t& offset, std::string& value) {
+    std::uint16_t size = 0;
+    if (!ReadU16(input, offset, size) || offset + size > input.size()) return false;
+    value.assign(input.data() + offset, size);
+    offset += size;
+    return true;
+}
+
+void AppendSizedString(std::string& out, const std::string& value) {
+    AppendU16(out, static_cast<std::uint16_t>(value.size()));
+    out.append(value);
 }
 
 }  // namespace
@@ -125,24 +207,22 @@ int ChatClient::SendRawLine(const std::string& payload) {
     std::lock_guard<std::mutex> lock(socketMutex_);
     if (!IsSocketValid(socket_)) return -1;
 
-    int totalSent = 0;
-    while (totalSent < static_cast<int>(payload.size())) {
-        int sent = send(socket_, payload.c_str() + totalSent, static_cast<int>(payload.size()) - totalSent, 0);
-        if (sent <= 0) {
-#ifdef _WIN32
-            AppendClientLog("SendRawLine failed totalSent=" + std::to_string(totalSent) +
-                            " err=" + std::to_string(WSAGetLastError()));
-#else
-            AppendClientLog("SendRawLine failed totalSent=" + std::to_string(totalSent) +
-                            " err=" + std::to_string(errno));
-#endif
-            return -1;
-        }
-        totalSent += sent;
+    std::string framePayload = payload;
+    while (!framePayload.empty() && (framePayload.back() == '\n' || framePayload.back() == '\r')) {
+        framePayload.pop_back();
     }
 
-    AppendClientLog("SendRawLine ok bytes=" + std::to_string(totalSent));
-    return totalSent;
+    if (!SendTextFrame(socket_, framePayload)) {
+#ifdef _WIN32
+        AppendClientLog("SendRawLine failed err=" + std::to_string(WSAGetLastError()));
+#else
+        AppendClientLog("SendRawLine failed err=" + std::to_string(errno));
+#endif
+        return -1;
+    }
+
+    AppendClientLog("SendRawLine ok bytes=" + std::to_string(framePayload.size()));
+    return static_cast<int>(framePayload.size());
 }
 
 bool ChatClient::SendEncryptedPayload(const std::string& user, const std::string& payload) {
@@ -344,20 +424,22 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
         return;
     }
 
-    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)),
-                                     std::istreambuf_iterator<char>());
-    if (bytes.size() > kMaxAttachmentBytes) {
+    if (draft.sizeBytes > kMaxAttachmentBytes) {
         SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
             river::base64::EncodeString("Attachment exceeds the transfer limit."));
         return;
     }
 
-    const std::string contentSha256 = HashPassword(BytesToString(bytes));
-    const std::string encoded = river::base64::Encode(bytes);
+    const std::string contentSha256 = HashFileSha256(draft.localPath);
+    if (contentSha256.empty()) {
+        SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
+            river::base64::EncodeString("Could not hash the source attachment."));
+        return;
+    }
     const std::string kind =
         draft.kind == AttachmentKind::Image ? "image" :
         draft.kind == AttachmentKind::Video ? "video" : "file";
-    const std::size_t totalChunks = encoded.empty() ? 1 : (encoded.size() + kAttachmentChunkChars - 1) / kAttachmentChunkChars;
+    const std::size_t totalChunks = draft.sizeBytes == 0 ? 1 : (draft.sizeBytes + kAttachmentBinaryChunkBytes - 1) / kAttachmentBinaryChunkBytes;
 
     if (!SendPrivateMessage(CurrentUser(),
                             requester,
@@ -369,15 +451,26 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
         return;
     }
 
-    if (encoded.empty()) {
-        SendPrivateMessage(CurrentUser(), requester, "@attachchunk|" + attachmentId + "|0|");
-        return;
-    }
-
     for (std::size_t index = 0; index < totalChunks; ++index) {
-        const std::string chunk = encoded.substr(index * kAttachmentChunkChars, kAttachmentChunkChars);
-        if (!SendPrivateMessage(CurrentUser(), requester,
-                                "@attachchunk|" + attachmentId + "|" + std::to_string(index) + "|" + chunk)) {
+        std::string plainChunk;
+        if (draft.sizeBytes > 0) {
+            std::vector<char> buffer(kAttachmentBinaryChunkBytes);
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize got = input.gcount();
+            if (got <= 0) {
+                SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
+                    river::base64::EncodeString("Transferencia interrumpida."));
+                return;
+            }
+            plainChunk.assign(buffer.data(), static_cast<std::size_t>(got));
+        }
+        const std::string encryptedChunk = river::SealPayloadBinary(plainChunk);
+        if (encryptedChunk.empty() ||
+            !SendAttachmentChunkFrame(requester,
+                                      attachmentId,
+                                      static_cast<int>(index),
+                                      static_cast<int>(totalChunks),
+                                      encryptedChunk)) {
             SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
                 river::base64::EncodeString("Transferencia interrumpida."));
             return;
@@ -390,10 +483,14 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
     for (const auto& chunk : transfer.chunks) joined += chunk;
 
     std::vector<unsigned char> decoded;
-    if (!river::base64::Decode(joined, decoded)) {
-        state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
-        state_.SetLastError("Could not reconstruct the received attachment.");
-        return;
+    if (transfer.binaryChunks) {
+        decoded.assign(joined.begin(), joined.end());
+    } else {
+        if (!river::base64::Decode(joined, decoded)) {
+            state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
+            state_.SetLastError("Could not reconstruct the received attachment.");
+            return;
+        }
     }
     if (decoded.size() > kMaxAttachmentBytes ||
         decoded.size() != transfer.attachment.sizeBytes ||
@@ -419,6 +516,7 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
                                  AttachmentTransferState::Received,
                                  transfer.targetPath);
     state_.SetStatusDetail("Attachment received: " + transfer.attachment.displayName);
+    state_.AddSystemLog("SYSTEM: Attachment received and saved to " + transfer.targetPath);
     state_.ClearLastError();
 }
 
@@ -455,8 +553,9 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
         }
         transfer.mode = parts[6];
         transfer.totalChunks = std::max(1, std::atoi(parts[7].c_str()));
+        transfer.binaryChunks = true;
         if (transfer.totalChunks < 1 ||
-            transfer.totalChunks > static_cast<int>((kMaxAttachmentBytes * 2 + kAttachmentChunkChars - 1) / kAttachmentChunkChars)) {
+            transfer.totalChunks > static_cast<int>((kMaxAttachmentBytes + kAttachmentBinaryChunkBytes - 1) / kAttachmentBinaryChunkBytes)) {
             incomingAttachments_.erase(key);
             state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
             state_.SetLastError("Attachment metadata is invalid.");
@@ -483,6 +582,7 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
             if (it == incomingAttachments_.end()) return true;
 
             IncomingAttachmentTransfer& transfer = it->second;
+            transfer.binaryChunks = false;
             const int index = std::atoi(parts[2].c_str());
             if (index < 0 || index >= transfer.totalChunks) return true;
             if (parts[3].size() > kAttachmentChunkChars) return true;
@@ -518,143 +618,203 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
     return false;
 }
 
+bool ChatClient::SendAttachmentChunkFrame(const std::string& target,
+                                          const std::string& attachmentId,
+                                          int index,
+                                          int totalChunks,
+                                          const std::string& encryptedChunk) {
+    if (target.empty() || target.size() > 255 ||
+        attachmentId.empty() || attachmentId.size() > 255 ||
+        index < 0 || totalChunks <= 0 ||
+        encryptedChunk.empty()) {
+        return false;
+    }
+
+    std::string payload;
+    AppendSizedString(payload, target);
+    AppendSizedString(payload, attachmentId);
+    AppendU32(payload, static_cast<std::uint32_t>(index));
+    AppendU32(payload, static_cast<std::uint32_t>(totalChunks));
+    payload.append(encryptedChunk);
+
+    std::lock_guard<std::mutex> lock(socketMutex_);
+    return IsSocketValid(socket_) && SendFrame(socket_, kFrameTypeAttachmentChunk, payload);
+}
+
+bool ChatClient::HandleAttachmentChunkFrame(const std::string& payload) {
+    std::size_t offset = 0;
+    std::string sender;
+    std::string attachmentId;
+    std::uint32_t index = 0;
+    std::uint32_t totalChunks = 0;
+    if (!ReadSizedString(payload, offset, sender) ||
+        !ReadSizedString(payload, offset, attachmentId) ||
+        !ReadU32(payload, offset, index) ||
+        !ReadU32(payload, offset, totalChunks) ||
+        totalChunks == 0 ||
+        totalChunks > (kMaxAttachmentBytes + kAttachmentBinaryChunkBytes - 1) / kAttachmentBinaryChunkBytes ||
+        index >= totalChunks ||
+        offset >= payload.size()) {
+        return true;
+    }
+
+    std::string plainChunk;
+    const std::string encryptedChunk = payload.substr(offset);
+    if (!river::OpenPayloadBinary(encryptedChunk, plainChunk) ||
+        plainChunk.size() > kAttachmentBinaryChunkBytes) {
+        state_.UpdateAttachmentState(sender, attachmentId, AttachmentTransferState::Failed);
+        state_.SetLastError("Attachment chunk integrity check failed.");
+        return true;
+    }
+
+    const std::string key = sender + "|" + attachmentId;
+    IncomingAttachmentTransfer completed;
+    bool done = false;
+    {
+        std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
+        auto it = incomingAttachments_.find(key);
+        if (it == incomingAttachments_.end()) return true;
+
+        IncomingAttachmentTransfer& transfer = it->second;
+        if (transfer.totalChunks != static_cast<int>(totalChunks)) return true;
+        if (transfer.chunks[index].empty()) {
+            transfer.chunks[index] = plainChunk;
+            transfer.receivedChunks++;
+        }
+        if (transfer.receivedChunks == transfer.totalChunks) {
+            completed = transfer;
+            incomingAttachments_.erase(it);
+            done = true;
+        }
+    }
+    if (done) FinishIncomingAttachment(completed);
+    return true;
+}
+
 void ChatClient::ReceiveLoop(SocketHandle sock) {
-    char buf[16384];
-    std::string accum;
     AppendClientLog("ReceiveLoop start");
     while (!stopRequested_.load()) {
-        int bytes = recv(sock, buf, 16383, 0);
-        if (bytes == 0) {
-            AppendClientLog("ReceiveLoop recv=0 peer closed");
-            break;
-        }
-        if (bytes < 0) {
-#ifdef _WIN32
-            int err = WSAGetLastError();
-            if (err == WSAETIMEDOUT) {
-                AppendClientLog("ReceiveLoop timeout");
-                continue;
-            }
-            AppendClientLog("ReceiveLoop error=" + std::to_string(err));
-#else
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            AppendClientLog("ReceiveLoop error=" + std::to_string(errno));
-#endif
+        std::uint16_t frameType = 0;
+        std::string line;
+        if (!RecvFrame(sock, frameType, line, 1024 * 1024)) {
+            AppendClientLog("ReceiveLoop frame read failed");
             break;
         }
 
-        buf[bytes] = '\0';
-        AppendClientLog("ReceiveLoop bytes=" + std::to_string(bytes));
-        accum += buf;
-        if (accum.size() > 1024 * 1024) accum.clear();
+        if (frameType == kFrameTypeAttachmentChunk) {
+            HandleAttachmentChunkFrame(line);
+            continue;
+        }
+        if (frameType != kFrameTypeText) {
+            AppendClientLog("ReceiveLoop unsupported frame type=" + std::to_string(frameType));
+            continue;
+        }
 
-        size_t pos = 0;
-        while ((pos = accum.find('\n')) != std::string::npos) {
-            std::string line = accum.substr(0, pos);
-            accum.erase(0, pos + 1);
-
-            if (line == "PING") {
-                AppendClientLog("ReceiveLoop line=PING");
-                SendRawLine("PONG\n");
-            } else if (line.rfind("AUTH_CHALLENGE:", 0) == 0) {
-                AppendClientLog("ReceiveLoop line=AUTH_CHALLENGE");
-                if (!SendChallengeLogin(line)) {
-                    state_.SetAuthActionPending(false);
-                    state_.SetLastError("Could not complete authentication challenge.");
-                }
-            } else if (line.find("FIRST LOGIN") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=FIRST LOGIN");
+        AppendClientLog("ReceiveLoop frame bytes=" + std::to_string(line.size()));
+        if (line == "PING") {
+            AppendClientLog("ReceiveLoop line=PING");
+            SendRawLine("PONG\n");
+        } else if (line.rfind("AUTH_CHALLENGE:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=AUTH_CHALLENGE");
+            if (!SendChallengeLogin(line)) {
                 state_.SetAuthActionPending(false);
-                state_.SetCredentialChangePending(false);
-                state_.SetMustChangeCredentials(true);
-                state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
-                state_.SetStatusDetail("First access detected. You must change ID and key.");
-                state_.ClearLastError();
-            } else if (line.find("ACCESO CONCEDIDO") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=ACCESO CONCEDIDO");
-                QueueAutoLogin("", "");
-                state_.SetAuthenticated(true);
-                state_.SetMustChangeCredentials(false);
-                state_.SetAuthActionPending(false);
-                state_.SetCredentialChangePending(false);
-                state_.SetConnectionState(ConnState::AUTHENTICATED);
-                state_.SetStatusDetail("Canal seguro autenticado.");
-                state_.ClearLastError();
-            } else if (line.find("UPLINK ESTABLISHED") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=UPLINK ESTABLISHED");
-                state_.SetConnectionState(ConnState::TOR_READY);
-                state_.SetStatusDetail("Canal Tor establecido. Esperando login.");
-                state_.ClearLastError();
-                std::string queuedUser;
-                std::string queuedPass;
-                if (ConsumeQueuedAutoLogin(queuedUser, queuedPass)) {
-                    AppendClientLog("ReceiveLoop auto-login user=" + queuedUser);
-                    SendLogin(queuedUser, queuedPass);
-                }
-            } else if (line.find("ACTUALIZADO. RECONECTA") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=ACTUALIZADO");
-                state_.SetMustChangeCredentials(false);
-                state_.SetAuthActionPending(false);
-                state_.SetCredentialChangePending(false);
-                state_.SetConnectionState(ConnState::RECONNECTING);
-                state_.SetStatusDetail("Credenciales actualizadas. Reautenticando en cuanto el canal vuelva a estar listo...");
-                state_.ClearLastError();
-            } else if (line.find("ACTUALIZADO") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=ACTUALIZADO SIMPLE");
-                QueueAutoLogin("", "");
-                state_.SetMustChangeCredentials(false);
-                state_.SetAuthActionPending(false);
-                state_.SetCredentialChangePending(false);
-                state_.SetStatusDetail("Credenciales actualizadas. Finalizando acceso...");
-                state_.ClearLastError();
-            } else if (line.find("CREDENCIALES INCORRECTAS") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=CREDENCIALES INCORRECTAS");
-                state_.SetAuthActionPending(false);
-                state_.SetConnectionState(ConnState::TOR_READY);
-                state_.SetStatusDetail("Canal Tor listo. Esperando nuevas credenciales.");
-                state_.SetLastError("Credenciales incorrectas.");
-                state_.AddSystemLog("SYSTEM: CREDENCIALES INCORRECTAS.");
-            } else if (line.find("HWID NO RECONOCIDO") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=HWID NO RECONOCIDO");
-                state_.SetAuthActionPending(false);
-                state_.SetConnectionState(ConnState::TOR_READY);
-                state_.SetStatusDetail("Canal Tor listo. Acceso denegado por HWID.");
-                state_.SetLastError("Esta maquina no coincide con el HWID autorizado.");
-                state_.AddSystemLog("SYSTEM: HWID NO RECONOCIDO.");
-            } else if (line.find("ACCESO BLOQUEADO") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=ACCESO BLOQUEADO");
-                state_.SetAuthActionPending(false);
-                state_.SetCredentialChangePending(false);
-                state_.SetConnectionState(ConnState::TOR_READY);
-                state_.SetStatusDetail("Canal Tor listo. Acceso bloqueado.");
-                state_.SetLastError("Acceso bloqueado para esta maquina.");
-                state_.AddSystemLog("SYSTEM: ACCESO BLOQUEADO.");
-            } else if (line.find("ERROR ACTUALIZANDO USUARIO") != std::string::npos) {
-                AppendClientLog("ReceiveLoop line=ERROR ACTUALIZANDO USUARIO");
-                state_.SetCredentialChangePending(false);
-                state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
-                state_.SetStatusDetail("Could not complete the initial update.");
-                state_.SetLastError("Could not update the user or key.");
-                state_.AddSystemLog("SYSTEM: ERROR ACTUALIZANDO USUARIO.");
-            } else if (line.rfind("[ATTACH]:", 0) == 0) {
-                AppendClientLog("ReceiveLoop line=ATTACH_OFFER");
-                HandleAttachmentBroadcast(line);
-            } else if (line.find("[PM]:") == 0) {
-                AppendClientLog("ReceiveLoop line=PM");
-                const std::string rest = line.substr(5);
-                const std::size_t sep = rest.find(':');
-                if (sep != std::string::npos) {
-                    const std::string sender = rest.substr(0, sep);
-                    const std::string encPayload = rest.substr(sep + 1);
-                    std::string dec;
-                    if (river::OpenPayload(encPayload, dec) && HandleAttachmentPrivateControl(sender, dec))
-                        continue;
-                }
-                state_.AddIncomingWireMessage(rest, CurrentUser(), true);
-            } else {
-                AppendClientLog("ReceiveLoop line=" + line);
-                state_.AddIncomingWireMessage(line, CurrentUser(), false);
+                state_.SetLastError("Could not complete authentication challenge.");
             }
+        } else if (line.find("FIRST LOGIN") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=FIRST LOGIN");
+            state_.SetAuthActionPending(false);
+            state_.SetCredentialChangePending(false);
+            state_.SetMustChangeCredentials(true);
+            state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
+            state_.SetStatusDetail("First access detected. You must change ID and key.");
+            state_.ClearLastError();
+        } else if (line.find("ACCESO CONCEDIDO") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=ACCESO CONCEDIDO");
+            QueueAutoLogin("", "");
+            state_.SetAuthenticated(true);
+            state_.SetMustChangeCredentials(false);
+            state_.SetAuthActionPending(false);
+            state_.SetCredentialChangePending(false);
+            state_.SetConnectionState(ConnState::AUTHENTICATED);
+            state_.SetStatusDetail("Canal seguro autenticado.");
+            state_.ClearLastError();
+        } else if (line.rfind("SESSION:", 0) == 0) {
+            AppendClientLog("ReceiveLoop session=" + line.substr(8));
+            state_.SetStatusDetail("Sesion segura activa.");
+        } else if (line.find("UPLINK ESTABLISHED") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=UPLINK ESTABLISHED");
+            state_.SetConnectionState(ConnState::TOR_READY);
+            state_.SetStatusDetail("Canal Tor establecido. Esperando login.");
+            state_.ClearLastError();
+            std::string queuedUser;
+            std::string queuedPass;
+            if (ConsumeQueuedAutoLogin(queuedUser, queuedPass)) {
+                AppendClientLog("ReceiveLoop auto-login user=" + queuedUser);
+                SendLogin(queuedUser, queuedPass);
+            }
+        } else if (line.find("ACTUALIZADO. RECONECTA") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=ACTUALIZADO");
+            state_.SetMustChangeCredentials(false);
+            state_.SetAuthActionPending(false);
+            state_.SetCredentialChangePending(false);
+            state_.SetConnectionState(ConnState::RECONNECTING);
+            state_.SetStatusDetail("Credenciales actualizadas. Reautenticando en cuanto el canal vuelva a estar listo...");
+            state_.ClearLastError();
+        } else if (line.find("ACTUALIZADO") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=ACTUALIZADO SIMPLE");
+            QueueAutoLogin("", "");
+            state_.SetMustChangeCredentials(false);
+            state_.SetAuthActionPending(false);
+            state_.SetCredentialChangePending(false);
+            state_.SetStatusDetail("Credenciales actualizadas. Finalizando acceso...");
+            state_.ClearLastError();
+        } else if (line.find("CREDENCIALES INCORRECTAS") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=CREDENCIALES INCORRECTAS");
+            state_.SetAuthActionPending(false);
+            state_.SetConnectionState(ConnState::TOR_READY);
+            state_.SetStatusDetail("Canal Tor listo. Esperando nuevas credenciales.");
+            state_.SetLastError("Credenciales incorrectas.");
+            state_.AddSystemLog("SYSTEM: CREDENCIALES INCORRECTAS.");
+        } else if (line.find("HWID NO RECONOCIDO") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=HWID NO RECONOCIDO");
+            state_.SetAuthActionPending(false);
+            state_.SetConnectionState(ConnState::TOR_READY);
+            state_.SetStatusDetail("Canal Tor listo. Acceso denegado por HWID.");
+            state_.SetLastError("Esta maquina no coincide con el HWID autorizado.");
+            state_.AddSystemLog("SYSTEM: HWID NO RECONOCIDO.");
+        } else if (line.find("ACCESO BLOQUEADO") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=ACCESO BLOQUEADO");
+            state_.SetAuthActionPending(false);
+            state_.SetCredentialChangePending(false);
+            state_.SetConnectionState(ConnState::TOR_READY);
+            state_.SetStatusDetail("Canal Tor listo. Acceso bloqueado.");
+            state_.SetLastError("Acceso bloqueado para esta maquina.");
+            state_.AddSystemLog("SYSTEM: ACCESO BLOQUEADO.");
+        } else if (line.find("ERROR ACTUALIZANDO USUARIO") != std::string::npos) {
+            AppendClientLog("ReceiveLoop line=ERROR ACTUALIZANDO USUARIO");
+            state_.SetCredentialChangePending(false);
+            state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
+            state_.SetStatusDetail("Could not complete the initial update.");
+            state_.SetLastError("Could not update the user or key.");
+            state_.AddSystemLog("SYSTEM: ERROR ACTUALIZANDO USUARIO.");
+        } else if (line.rfind("[ATTACH]:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=ATTACH_OFFER");
+            HandleAttachmentBroadcast(line);
+        } else if (line.find("[PM]:") == 0) {
+            AppendClientLog("ReceiveLoop line=PM");
+            const std::string rest = line.substr(5);
+            const std::size_t sep = rest.find(':');
+            if (sep != std::string::npos) {
+                const std::string sender = rest.substr(0, sep);
+                const std::string encPayload = rest.substr(sep + 1);
+                std::string dec;
+                if (river::OpenPayload(encPayload, dec) && HandleAttachmentPrivateControl(sender, dec))
+                    continue;
+            }
+            state_.AddIncomingWireMessage(rest, CurrentUser(), true);
+        } else {
+            AppendClientLog("ReceiveLoop line=" + line);
+            state_.AddIncomingWireMessage(line, CurrentUser(), false);
         }
     }
     AppendClientLog("ReceiveLoop end");

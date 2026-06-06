@@ -18,6 +18,7 @@ private:
         SocketHandle socket = kInvalidSocket;
         std::string nick;
         std::string hwid;
+        std::string sessionId;
         bool auth = false;
         bool isAdmin = false;
         time_t lastSeen = 0;
@@ -43,6 +44,7 @@ private:
     void BroadcastUsers();
     bool SendDirectLineToUser(const std::string& toNick, const std::string& line);
     bool SendPrivateMessage(const std::string& toNick, const std::string& fromNick, const std::string& encPayload);
+    bool RelayAttachmentChunk(const std::string& fromNick, const std::string& payload);
     bool KickUser(const std::string& nick, const std::string& reason);
     void DisconnectByHwid(const std::string& hwid, const std::string& reason);
     void HandleAdminCommand(SocketHandle clientSocket, const ClientSession& currentClient, const std::string& command);
