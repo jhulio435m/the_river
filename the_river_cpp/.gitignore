@@ -17,5 +17,6 @@ the_river_server_wsl
 tor_server_wsl.conf
 tor_bin/
 build_cmake/
+build_san/
 river_unit_tests
 river_integration_tests

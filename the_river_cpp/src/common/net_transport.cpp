@@ -103,6 +103,7 @@ bool RecvFrame(SocketHandle sock, std::uint16_t& type, std::string& payload, std
     type = 0;
 
     char header[kFrameHeaderBytes] = {};
+    // cppcheck-suppress bufferAccessOutOfBounds
     if (!RecvExact(sock, header, sizeof(header))) return false;
 
     const std::uint32_t magic = LoadU32(header);
@@ -113,7 +114,8 @@ bool RecvFrame(SocketHandle sock, std::uint16_t& type, std::string& payload, std
     if (length > maxPayloadBytes || length > kAbsoluteMaxPayloadBytes) return false;
 
     payload.assign(length, '\0');
-    return length == 0 || RecvExact(sock, payload.data(), payload.size());
+    // cppcheck-suppress bufferAccessOutOfBounds
+    return length == 0 || RecvExact(sock, &payload[0], payload.size());
 }
 
 bool SendTextFrame(SocketHandle sock, const std::string& payload) {
