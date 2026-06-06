@@ -22,6 +22,7 @@ tor_runtime.log
 tor_server_wsl.conf
 tor_bin/
 tor_data/
+.the_river_machine_id
 CirculoServer/
 
 # Local IDE/system files

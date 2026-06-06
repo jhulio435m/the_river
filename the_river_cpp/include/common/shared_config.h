@@ -19,6 +19,7 @@ std::string AdminUsername();
 std::string AdminDefaultPassword();
 std::string DefaultUserPassword();
 
+bool IsEncryptionKeyStrong(const std::string& key);
 bool HasRequiredClientConfig();
 bool HasRequiredServerConfig();
 

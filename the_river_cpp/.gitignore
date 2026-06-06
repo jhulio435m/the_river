@@ -11,6 +11,7 @@ the_river_server_wsl
 # Bases de datos y logs
 *.db
 *.log
+.the_river_machine_id
 
 # Otros
 tor_server_wsl.conf

@@ -18,6 +18,7 @@ namespace {
 constexpr std::size_t kMaxLineBytes = 65536;
 constexpr std::size_t kMaxChatPayloadBytes = 8192;
 constexpr std::size_t kMaxAttachmentControlBytes = 16384;
+constexpr int kLoginChallengeTtlSeconds = 60;
 
 bool StartsWith(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
@@ -46,9 +47,21 @@ std::string ChallengeSpecFromPasswordHash(const std::string& storedHash) {
 ChatServer::ChatServer(const std::string& dbPath, const std::string& logPath)
     : dbPath_(dbPath), logPath_(logPath) {}
 
-void ChatServer::SendLine(SocketHandle sock, const std::string& msg) {
+bool ChatServer::SendLine(SocketHandle sock, const std::string& msg) {
     std::string full = msg + "\n";
-    send(sock, full.c_str(), (int)full.size(), 0);
+    std::size_t totalSent = 0;
+    while (totalSent < full.size()) {
+        int sent = send(sock,
+                        full.c_str() + totalSent,
+                        static_cast<int>(full.size() - totalSent),
+                        0);
+        if (sent <= 0) {
+            LogRuntime("NET", "send failed on socket " + std::to_string(sock));
+            return false;
+        }
+        totalSent += static_cast<std::size_t>(sent);
+    }
+    return true;
 }
 
 void ChatServer::LogEncryptedMessage(const std::string& user, const std::string& encryptedPayload) {
@@ -59,7 +72,7 @@ void ChatServer::LogEncryptedMessage(const std::string& user, const std::string&
     char ts[32];
     std::time_t now = std::time(nullptr);
     std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-    std::string entry = std::string(ts) + "|" + user + ":" + encryptedPayload;
+    std::string entry = std::string(ts) + "|" + user + ":payload_sha256=" + HashPassword(encryptedPayload);
     f << river::SealPayload(entry) << "\n";
 }
 
@@ -238,7 +251,7 @@ ChatServer::LoginResult ChatServer::AuthorizeLoginProof(const std::string& usern
         result.code = LoginCode::InvalidCredentials;
     } else {
         const std::string expected = HmacSha256Hex(storedHash, nonce + "|" + username + "|" + hwid);
-        if (expected != proof) {
+        if (!ConstantTimeEquals(expected, proof)) {
             result.code = LoginCode::InvalidCredentials;
         } else {
             UserRecord record = repo_.FindUserByUsername(username);
@@ -419,6 +432,7 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
     std::string pendingLoginUser;
     std::string pendingLoginHwid;
     std::string pendingLoginNonce;
+    time_t pendingLoginIssuedAt = 0;
 
     SendLine(clientSocket, "SYSTEM: UPLINK ESTABLISHED.");
 
@@ -475,6 +489,7 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 pendingLoginUser = user;
                 pendingLoginHwid = hwid;
                 pendingLoginNonce = RandomHex(16);
+                pendingLoginIssuedAt = time(nullptr);
                 SendLine(clientSocket, "AUTH_CHALLENGE:" + pendingLoginNonce + ":" + challengeSpec);
             } else if (StartsWith(raw, "[LOGIN_PROOF]:")) {
                 std::stringstream ss(raw.substr(14));
@@ -484,7 +499,12 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 std::getline(ss, user, ':');
                 std::getline(ss, hwid, ':');
                 std::getline(ss, proof, ':');
-                if (user != pendingLoginUser || hwid != pendingLoginHwid || pendingLoginNonce.empty()) {
+                if (user != pendingLoginUser ||
+                    hwid != pendingLoginHwid ||
+                    pendingLoginNonce.empty() ||
+                    proof.size() != 64 ||
+                    time(nullptr) - pendingLoginIssuedAt > kLoginChallengeTtlSeconds) {
+                    pendingLoginNonce.clear();
                     SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
                     continue;
                 }
@@ -556,6 +576,10 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 size_t secondSep = remaining.find(':');
                 if (secondSep == std::string::npos) continue;
                 std::string encPayload = remaining.substr(secondSep + 1);
+                if (!IsValidUsername(target) || encPayload.size() > kMaxChatPayloadBytes) {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE PRIVADO RECHAZADO.");
+                    continue;
+                }
                 if (!SendPrivateMessage(target, currentNick, encPayload))
                     SendLine(clientSocket, "SYSTEM: Usuario '" + target + "' no encontrado.");
             } else if (authed && isAdmin) {

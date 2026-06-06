@@ -45,6 +45,11 @@ std::vector<std::string> SplitByDelimiter(const std::string& value, char delimit
     return parts;
 }
 
+std::string BytesToString(const std::vector<unsigned char>& bytes) {
+    if (bytes.empty()) return "";
+    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
 }  // namespace
 
 ChatClient::ChatClient(ChatState& state) : state_(state) {}
@@ -257,6 +262,10 @@ bool ChatClient::RequestAttachment(const AttachmentPayload& attachment, const st
         state_.SetLastError("Solicitud de adjunto invalida.");
         return false;
     }
+    if (attachment.sizeBytes > kMaxAttachmentBytes) {
+        state_.SetLastError("Attachment too large. Current limit: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".");
+        return false;
+    }
 
     IncomingAttachmentTransfer transfer;
     transfer.attachment = attachment;
@@ -302,6 +311,7 @@ bool ChatClient::HandleAttachmentBroadcast(const std::string& line) {
     river::base64::DecodeToString(parts[3], attachment.displayName);
     river::base64::DecodeToString(parts[4], attachment.mimeType);
     attachment.sizeBytes = static_cast<std::size_t>(std::strtoull(parts[5].c_str(), nullptr, 10));
+    if (attachment.sizeBytes > kMaxAttachmentBytes || attachment.id.size() > 80 || !IsValidUsername(sender)) return true;
     attachment.state = AttachmentTransferState::Available;
 
     if (sender == CurrentUser()) {
@@ -336,6 +346,13 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
 
     std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)),
                                      std::istreambuf_iterator<char>());
+    if (bytes.size() > kMaxAttachmentBytes) {
+        SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
+            river::base64::EncodeString("Attachment exceeds the transfer limit."));
+        return;
+    }
+
+    const std::string contentSha256 = HashPassword(BytesToString(bytes));
     const std::string encoded = river::base64::Encode(bytes);
     const std::string kind =
         draft.kind == AttachmentKind::Image ? "image" :
@@ -348,7 +365,7 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
                                 river::base64::EncodeString(draft.displayName) + "|" +
                                 river::base64::EncodeString(draft.mimeType) + "|" +
                                 std::to_string(draft.sizeBytes) + "|" + mode + "|" +
-                                std::to_string(totalChunks))) {
+                                std::to_string(totalChunks) + "|" + contentSha256)) {
         return;
     }
 
@@ -376,6 +393,14 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
     if (!river::base64::Decode(joined, decoded)) {
         state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
         state_.SetLastError("Could not reconstruct the received attachment.");
+        return;
+    }
+    if (decoded.size() > kMaxAttachmentBytes ||
+        decoded.size() != transfer.attachment.sizeBytes ||
+        (!transfer.attachment.contentSha256.empty() &&
+         !ConstantTimeEquals(HashPassword(BytesToString(decoded)), transfer.attachment.contentSha256))) {
+        state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
+        state_.SetLastError("Attachment integrity check failed.");
         return;
     }
 
@@ -410,7 +435,9 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
 
         const std::string key = sender + "|" + parts[1];
         std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
-        IncomingAttachmentTransfer& transfer = incomingAttachments_[key];
+        auto pending = incomingAttachments_.find(key);
+        if (pending == incomingAttachments_.end()) return true;
+        IncomingAttachmentTransfer& transfer = pending->second;
         transfer.ownerUser = sender;
         transfer.attachment.id = parts[1];
         transfer.attachment.ownerUser = sender;
@@ -420,8 +447,22 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
         river::base64::DecodeToString(parts[3], transfer.attachment.displayName);
         river::base64::DecodeToString(parts[4], transfer.attachment.mimeType);
         transfer.attachment.sizeBytes = static_cast<std::size_t>(std::strtoull(parts[5].c_str(), nullptr, 10));
+        if (transfer.attachment.sizeBytes > kMaxAttachmentBytes) {
+            incomingAttachments_.erase(key);
+            state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
+            state_.SetLastError("Attachment exceeds the transfer limit.");
+            return true;
+        }
         transfer.mode = parts[6];
         transfer.totalChunks = std::max(1, std::atoi(parts[7].c_str()));
+        if (transfer.totalChunks < 1 ||
+            transfer.totalChunks > static_cast<int>((kMaxAttachmentBytes * 2 + kAttachmentChunkChars - 1) / kAttachmentChunkChars)) {
+            incomingAttachments_.erase(key);
+            state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
+            state_.SetLastError("Attachment metadata is invalid.");
+            return true;
+        }
+        if (parts.size() >= 9) transfer.attachment.contentSha256 = parts[8];
         transfer.receivedChunks = 0;
         transfer.chunks.assign(transfer.totalChunks, "");
         transfer.attachment.state = AttachmentTransferState::Requested;
@@ -444,6 +485,7 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
             IncomingAttachmentTransfer& transfer = it->second;
             const int index = std::atoi(parts[2].c_str());
             if (index < 0 || index >= transfer.totalChunks) return true;
+            if (parts[3].size() > kAttachmentChunkChars) return true;
             if (transfer.chunks[index].empty()) {
                 transfer.chunks[index] = parts[3];
                 transfer.receivedChunks++;

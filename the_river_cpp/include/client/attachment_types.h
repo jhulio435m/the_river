@@ -29,6 +29,7 @@ struct AttachmentPayload {
     std::string ownerUser;
     std::string displayName;
     std::string mimeType;
+    std::string contentSha256;
     std::string localPath;
     AttachmentKind kind = AttachmentKind::File;
     std::size_t sizeBytes = 0;

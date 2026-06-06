@@ -36,6 +36,7 @@ std::vector<std::string> Split(const std::string& value, char delimiter) {
 }
 
 std::vector<unsigned char> EnvelopeKey() {
+    if (!IsEncryptionKeyStrong(EncryptionKey())) return {};
     return HexToBytes(HashPassword("the-river-envelope-v3|" + EncryptionKey()));
 }
 

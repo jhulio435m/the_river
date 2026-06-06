@@ -4,6 +4,7 @@
 #include <fstream>
 #include <limits.h>
 #include <map>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -114,12 +115,20 @@ std::string DefaultUserPassword() {
     return EnvOrDefault("THE_RIVER_NEW_USER_PASSWORD", "");
 }
 
+bool IsEncryptionKeyStrong(const std::string& key) {
+    return key.size() >= 32 &&
+           key.find('\n') == std::string::npos &&
+           key.find('\r') == std::string::npos;
+}
+
 bool HasRequiredClientConfig() {
-    return !OnionAddress().empty() && !EncryptionKey().empty();
+    return !OnionAddress().empty() && IsEncryptionKeyStrong(EncryptionKey());
 }
 
 bool HasRequiredServerConfig() {
-    return !EncryptionKey().empty() && !AdminDefaultPassword().empty() && !DefaultUserPassword().empty();
+    return IsEncryptionKeyStrong(EncryptionKey()) &&
+           !AdminDefaultPassword().empty() &&
+           !DefaultUserPassword().empty();
 }
 
 }  // namespace river

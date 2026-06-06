@@ -38,7 +38,7 @@ private:
 
     void HandleClient(SocketHandle clientSocket);
     void HeartbeatLoop();
-    void SendLine(SocketHandle sock, const std::string& msg);
+    bool SendLine(SocketHandle sock, const std::string& msg);
     void Broadcast(const std::string& msg);
     void BroadcastUsers();
     bool SendDirectLineToUser(const std::string& toNick, const std::string& line);
