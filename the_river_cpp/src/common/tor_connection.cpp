@@ -193,10 +193,17 @@ bool EnsureLocalTorIsRunning() {
             if (devNull > STDERR_FILENO) close(devNull);
         }
 
+        std::string torBin = "tor";
+        if (FileExists("tor_bin/tor")) {
+            torBin = "tor_bin/tor";
+        } else if (FileExists("./tor")) {
+            torBin = "./tor";
+        }
+
         if (FileExists(serverTorConfig)) {
-            execlp("tor", "tor", "-f", serverTorConfig.c_str(), (char*)nullptr);
+            execlp(torBin.c_str(), "tor", "-f", serverTorConfig.c_str(), (char*)nullptr);
         } else {
-            execlp("tor", "tor", "--SocksPort", "9050", "--DataDirectory", "tor_data", (char*)nullptr);
+            execlp(torBin.c_str(), "tor", "--SocksPort", "9050", "--DataDirectory", "tor_data", (char*)nullptr);
         }
         _exit(127);
     }

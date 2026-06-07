@@ -1,0 +1,134 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Client (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libgl1-mesa-dev \
+            libglfw3-dev \
+            libssl-dev \
+            pkg-config \
+            wget \
+            zip
+
+      - name: Configure CMake
+        run: cmake -S the_river_cpp -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build client
+        run: cmake --build build --target the_river_client --parallel
+
+      - name: Download Tor Expert Bundle (Linux)
+        run: |
+          mkdir -p tor_dist
+          wget -q https://dist.torproject.org/torbrowser/14.0.1/tor-expert-bundle-linux-x86_64-14.0.1.tar.gz -O tor_dist/tor-expert-bundle.tar.gz
+          tar -xzf tor_dist/tor-expert-bundle.tar.gz -C tor_dist
+
+      - name: Package Release
+        run: |
+          mkdir -p package_linux/tor_bin
+          cp build/the_river_client package_linux/
+          cp tor_dist/tor/tor package_linux/tor_bin/
+          cp tor_dist/tor/geoip package_linux/tor_bin/
+          cp tor_dist/tor/geoip6 package_linux/tor_bin/
+          chmod +x package_linux/tor_bin/tor
+          chmod +x package_linux/the_river_client
+          cd package_linux
+          zip -r ../the_river_client_linux.zip the_river_client tor_bin
+
+      - name: Upload Linux Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: the_river_client_linux
+          path: the_river_client_linux.zip
+
+  build-windows:
+    name: Build Client (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-glfw
+            mingw-w64-x86_64-openssl
+            zip
+
+      - name: Build client using MinGW
+        shell: msys2 {0}
+        run: |
+          cd the_river_cpp
+          bash scripts/build_client_windows.sh
+
+      - name: Download Tor Expert Bundle (Windows)
+        shell: bash
+        run: |
+          mkdir -p tor_dist
+          curl -sS https://dist.torproject.org/torbrowser/14.0.1/tor-expert-bundle-windows-x86_64-14.0.1.tar.gz -o tor_dist/tor-expert-bundle.tar.gz
+          tar -xzf tor_dist/tor-expert-bundle.tar.gz -C tor_dist
+
+      - name: Package Release
+        shell: bash
+        run: |
+          mkdir -p package_windows/tor_bin
+          cp the_river_cpp/the_river_client.exe package_windows/
+          cp tor_dist/tor/tor.exe package_windows/tor_bin/
+          cp tor_dist/tor/geoip package_windows/tor_bin/
+          cp tor_dist/tor/geoip6 package_windows/tor_bin/
+          cd package_windows
+          zip -r ../the_river_client_windows.zip the_river_client.exe tor_bin
+
+      - name: Upload Windows Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: the_river_client_windows
+          path: the_river_client_windows.zip
+
+  release:
+    name: Create GitHub Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download Linux package
+        uses: actions/download-artifact@v4
+        with:
+          name: the_river_client_linux
+
+      - name: Download Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: the_river_client_windows
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            the_river_client_linux.zip
+            the_river_client_windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
