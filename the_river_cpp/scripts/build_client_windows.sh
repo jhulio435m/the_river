@@ -20,7 +20,7 @@ else
     CC_BIN="gcc"
 fi
 
-COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/tor_connection.cpp src/common/base64.cpp src/common/shared_config.cpp"
+COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/tor_connection.cpp src/common/base64.cpp src/common/shared_config.cpp src/common/net_transport.cpp"
 RUNTIME_SRC="src/client/platform_runtime.cpp"
 CLIENT_PLATFORM_SRC="src/client/ui_win32.cpp src/client/file_picker_win32.cpp"
 IMGUI_SRC="imgui_src/imgui.cpp imgui_src/imgui_draw.cpp imgui_src/imgui_tables.cpp imgui_src/imgui_widgets.cpp imgui_src/backends/imgui_impl_win32.cpp imgui_src/backends/imgui_impl_opengl3.cpp"

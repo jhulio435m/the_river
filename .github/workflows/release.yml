@@ -47,8 +47,12 @@ jobs:
           mkdir -p package_linux/tor_bin
           cp build/the_river_client package_linux/
           cp tor_dist/tor/tor package_linux/tor_bin/
-          cp tor_dist/tor/geoip package_linux/tor_bin/
-          cp tor_dist/tor/geoip6 package_linux/tor_bin/
+          cp tor_dist/tor/libcrypto.so.3 package_linux/tor_bin/
+          cp tor_dist/tor/libevent-2.1.so.7 package_linux/tor_bin/
+          cp tor_dist/tor/libssl.so.3 package_linux/tor_bin/
+          cp tor_dist/tor/libstdc++.so.6 package_linux/tor_bin/
+          cp tor_dist/data/geoip package_linux/tor_bin/
+          cp tor_dist/data/geoip6 package_linux/tor_bin/
           chmod +x package_linux/tor_bin/tor
           chmod +x package_linux/the_river_client
           cd package_linux
@@ -97,8 +101,8 @@ jobs:
           mkdir -p package_windows/tor_bin
           cp the_river_cpp/the_river_client.exe package_windows/
           cp tor_dist/tor/tor.exe package_windows/tor_bin/
-          cp tor_dist/tor/geoip package_windows/tor_bin/
-          cp tor_dist/tor/geoip6 package_windows/tor_bin/
+          cp tor_dist/data/geoip package_windows/tor_bin/
+          cp tor_dist/data/geoip6 package_windows/tor_bin/
           cd package_windows
           zip -r ../the_river_client_windows.zip the_river_client.exe tor_bin
 
@@ -114,21 +118,15 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Download Linux package
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: the_river_client_linux
-
-      - name: Download Windows package
-        uses: actions/download-artifact@v4
-        with:
-          name: the_river_client_windows
+          path: artifacts
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            the_river_client_linux.zip
-            the_river_client_windows.zip
+          files: artifacts/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

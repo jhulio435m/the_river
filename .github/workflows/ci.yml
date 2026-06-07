@@ -128,3 +128,26 @@ jobs:
           the_river_cpp/src/common/*.cpp
           the_river_cpp/src/server/*.cpp
           the_river_cpp/server.cpp
+
+  build-windows:
+    name: Windows MinGW
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-glfw
+            mingw-w64-x86_64-openssl
+
+      - name: Build client using MinGW
+        shell: msys2 {0}
+        run: |
+          cd the_river_cpp
+          bash scripts/build_client_windows.sh
