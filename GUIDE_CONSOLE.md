@@ -11,7 +11,7 @@ Copia y pega este bloque completo en tu terminal. Hará todo por ti:
 ```bash
 # 1. Crear carpeta y descargar
 mkdir -p ~/TheRiverChat && cd ~/TheRiverChat
-wget https://github.com/jhulio435m/the_river/releases/download/v1.0.2/the_river_client_linux.zip
+wget -L https://github.com/jhulio435m/the_river/releases/download/v1.0.3/the_river_client_linux.zip
 
 # 2. Extraer y preparar permisos
 unzip -o the_river_client_linux.zip
@@ -37,7 +37,7 @@ New-Item -ItemType Directory -Force -Path "$HOME\TheRiverChat"
 cd "$HOME\TheRiverChat"
 
 # 2. Descargar el cliente
-Invoke-WebRequest -Uri "https://github.com/jhulio435m/the_river/releases/download/v1.0.2/the_river_client_windows.zip" -OutFile "client.zip"
+Invoke-WebRequest -Uri "https://github.com/jhulio435m/the_river/releases/download/v1.0.3/the_river_client_windows.zip" -OutFile "client.zip"
 
 # 3. Extraer archivos
 Expand-Archive -Path "client.zip" -DestinationPath "." -Force
