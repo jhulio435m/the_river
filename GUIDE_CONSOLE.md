@@ -19,10 +19,7 @@ chmod +x the_river_client tor_bin/tor
 
 # 3. Crear carpetas de datos y configuración
 mkdir -p tor_data
-cat <<EOF > tor_data/runtime.env
-THE_RIVER_AES_KEY=4183e31d65323b633c6f2f8669bcdd850eb42dab779c6265d30816385ec14c84
-THE_RIVER_ONION=3k4kzzkhiy6oyitin3g3wuy7hs6sf7tmcqdipe2vwaqxfyiggedltiid.onion
-EOF
+printf "THE_RIVER_AES_KEY=4183e31d65323b633c6f2f8669bcdd850eb42dab779c6265d30816385ec14c84\nTHE_RIVER_ONION=3k4kzzkhiy6oyitin3g3wuy7hs6sf7tmcqdipe2vwaqxfyiggedltiid.onion\n" > tor_data/runtime.env
 
 # 4. Iniciar el cliente
 ./the_river_client
