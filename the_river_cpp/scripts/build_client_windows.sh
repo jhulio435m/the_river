@@ -20,7 +20,7 @@ else
     CC_BIN="gcc"
 fi
 
-COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/tor_connection.cpp src/common/base64.cpp"
+COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/tor_connection.cpp src/common/base64.cpp src/common/shared_config.cpp"
 RUNTIME_SRC="src/client/platform_runtime.cpp"
 CLIENT_PLATFORM_SRC="src/client/ui_win32.cpp src/client/file_picker_win32.cpp"
 IMGUI_SRC="imgui_src/imgui.cpp imgui_src/imgui_draw.cpp imgui_src/imgui_tables.cpp imgui_src/imgui_widgets.cpp imgui_src/backends/imgui_impl_win32.cpp imgui_src/backends/imgui_impl_opengl3.cpp"
@@ -28,7 +28,7 @@ IMGUI_SRC="imgui_src/imgui.cpp imgui_src/imgui_draw.cpp imgui_src/imgui_tables.c
 CLIENT_SRC="$CLIENT_PLATFORM_SRC src/client/app_ui.cpp src/client/chat_state.cpp src/client/chat_client.cpp src/client/command_processor.cpp src/client/ui_sections.cpp src/client/attachment_utils.cpp src/client/image_preview_win32.cpp $RUNTIME_SRC"
 
 # En Windows/MinGW solemos vincular estaticamente para portabilidad
-LIBS="-lglfw3 -lgdi32 -lopengl32 -limm32 -lcomdlg32 -lole32 -lssl -lcrypto -lws2_32 -lpthread"
+LIBS="-lglfw3 -lgdi32 -lopengl32 -limm32 -lcomdlg32 -lole32 -lssl -lcrypto -lws2_32 -lurlmon -lcrypt32 -ldwmapi -lgdiplus -lpthread"
 INCLUDES="-I./include -I. -I./imgui_src -I./imgui_src/backends"
 
 if [ ! -f sqlite3_win.o ]; then
