@@ -96,7 +96,7 @@ jobs:
           tar -xzf tor_dist/tor-expert-bundle.tar.gz -C tor_dist
 
       - name: Package Release
-        shell: bash
+        shell: msys2 {0}
         run: |
           mkdir -p package_windows/tor_bin
           cp the_river_cpp/the_river_client.exe package_windows/
