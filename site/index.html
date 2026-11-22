@@ -8,15 +8,15 @@
   <meta name="theme-color" content="#0000a8">
   <meta name="referrer" content="no-referrer">
   <link rel="canonical" href="https://theriver.soryntel.com/">
-  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css?v=2">
   <script src="assets/site.js"></script>
 </head>
 <body>
   <a class="skip" href="#main"><span lang="es">Saltar al contenido</span><span lang="en">Skip to content</span></a>
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="index.html">~= the river &lt;3&gt;</a>
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="26" height="26">~= the river &lt;3&gt;</a>
       <nav aria-label="Principal / Main">
         <ul class="nav">
           <li><a href="index.html" aria-current="page"><span lang="es">Inicio</span><span lang="en">Home</span></a></li>
@@ -36,16 +36,12 @@
           <span lang="es">The River: un chat privado sobre Tor, con estética de BBS.</span>
           <span lang="en">The River: a private chat over Tor, BBS style.</span>
         </h1>
-        <p class="lead" lang="es">Un proyecto de chat en C++17 que reúne un servidor como servicio oculto de Tor, un cliente gráfico ImGui y una consola de administración. Estas grabaciones muestran el prototipo funcionando en Linux.</p>
-        <p class="lead" lang="en">A C++17 chat project with a Tor hidden-service server, an ImGui graphical client, and an admin console. These recordings show the prototype running on Linux.</p>
-        <p lang="es">Los mensajes privados y los adjuntos van cifrados de extremo a extremo; el inicio de sesión usa SCRAM, así que el servidor nunca guarda tu contraseña ni nada equivalente.</p>
-        <p lang="en">Private messages and attachments are end-to-end encrypted; login uses SCRAM, so the server never stores your password or anything equivalent to it.</p>
+        <p class="lead" lang="es">Un proyecto de chat en C++17 con salas, mensajes privados cifrados y conexión por Tor. Mira el prototipo en acción.</p>
+        <p class="lead" lang="en">A C++17 chat project with rooms, encrypted private messages, and Tor connectivity. See the prototype in action.</p>
         <div class="btn-row">
           <a class="btn" href="#demo"><span lang="es">&gt; Ver las demostraciones</span><span lang="en">&gt; Watch the demos</span></a>
           <a class="btn alt" href="https://github.com/jhulio435m/the_river"><span lang="es">Explorar el código</span><span lang="en">Explore the code</span></a>
         </div>
-        <p class="muted" lang="es">Las demostraciones usan cuentas de prueba y un proxy local para sustituir el trayecto por Tor durante la grabación.</p>
-        <p class="muted" lang="en">The demos use test accounts and a local proxy in place of the Tor connection while recording.</p>
       </div>
 
       <div class="hero-visual">
@@ -78,17 +74,15 @@
         <div class="term-foot" data-clock aria-hidden="true"><span class="ye">Sun Nov 22</span><span class="cy"> 00:00:00</span></div>
       </figure>
       <p class="mock-label"><span class="tag" lang="es">ILUSTRACIÓN</span><span class="tag" lang="en">ILLUSTRATION</span>
-        <span lang="es">Animación hecha en HTML para dar una idea del aspecto. Las <a href="#demo">grabaciones reales</a> están más abajo.</span>
-        <span lang="en">An HTML animation to give an idea of the look. The <a href="#demo">real recordings</a> are below.</span></p>
+        <span lang="es">Vista animada del cliente. <a href="#demo">Videos reales</a> más abajo.</span>
+        <span lang="en">Animated client preview. <a href="#demo">Real videos</a> below.</span></p>
       </div>
     </section>
 
     <section id="demo" aria-labelledby="demo-title">
       <h2 id="demo-title"><span lang="es">Demo real</span><span lang="en">Real demo</span></h2>
-      <p lang="es">Estos vídeos son <strong>grabaciones de pantalla reales</strong> de los binarios de The River funcionando: <code>the_river_server</code>, la consola <code>the_river_admin</code> y dos clientes gráficos (alice y bob) en la misma máquina Linux. No hay montajes ni maquetas: solo se recortó la zona de las ventanas y se comprimió el vídeo.</p>
-      <p lang="en">These videos are <strong>real screen recordings</strong> of The River binaries running: <code>the_river_server</code>, the <code>the_river_admin</code> console and two GUI clients (alice and bob) on the same Linux machine. No mock-ups or edited composites: the capture was only cropped to the windows and compressed.</p>
-      <p class="muted" lang="es">Cómo se grabó: en una pantalla virtual (Xvfb) con las pulsaciones automatizadas con xdotool, a velocidad de tecleo humana. Para poder grabar sin red, Tor se sustituye por un proxy SOCKS5 local que entrega la conexión al servidor local (con 2 s de espera simulando el circuito); el protocolo, el login SCRAM y el cifrado de extremo a extremo son los de siempre. Cuentas y claves de demostración. Los scripts para reproducirlo están en <code>the_river_cpp/scripts/demo/</code>.</p>
-      <p class="muted" lang="en">How it was recorded: on a virtual display (Xvfb) with keystrokes automated by xdotool at human typing speed. To record offline, Tor is replaced by a local SOCKS5 proxy that hands the connection to the local server (with a 2 s delay standing in for the circuit); the protocol, SCRAM login and end-to-end encryption are the real ones. Demo accounts and keys only. The scripts that reproduce it live in <code>the_river_cpp/scripts/demo/</code>.</p>
+      <p lang="es">Cinco momentos del prototipo funcionando.</p>
+      <p lang="en">Five moments from the working prototype.</p>
 
       <div class="clips">
         <figure class="clip">
@@ -97,8 +91,8 @@
             <source src="media/login.webm" type="video/webm">
           </video>
           <figcaption id="cap-login"><span class="rec">REC 0:26</span>
-            <span lang="es"><strong>Primer acceso.</strong> El cliente arranca con su fondo animado de bloques (NEGOCIANDO TOR → TOR LISTO), se pasa la interfaz a español con el botón ES, alice entra con el ID y la clave de un solo uso que le dio el admin y el cliente la obliga a elegir nuevo ID y clave antes de entrar al chat. Al entrar genera su clave de identidad y publica la pública.</span>
-            <span lang="en"><strong>First access.</strong> The client starts over its animated block background (NEGOCIANDO TOR → TOR LISTO), the UI is switched to Spanish with the ES button, alice signs in with the ID and one-time key the admin gave her, and the client makes her pick a new ID and key before entering the chat. On entry it generates her identity key and publishes the public half.</span></figcaption>
+            <span lang="es"><strong>Primer acceso.</strong> Alice entra y cambia sus credenciales iniciales.</span>
+            <span lang="en"><strong>First access.</strong> Alice signs in and changes her initial credentials.</span></figcaption>
         </figure>
         <figure class="clip">
           <video data-demo muted loop playsinline preload="metadata" width="1012" height="536" poster="media/admin.jpg" aria-describedby="cap-admin">
@@ -106,8 +100,8 @@
             <source src="media/admin.webm" type="video/webm">
           </video>
           <figcaption id="cap-admin"><span class="rec">REC 0:21</span>
-            <span lang="es"><strong>Consola de administración.</strong> <code>the_river_admin</code> entra por el mismo proxy SOCKS5 (la clave no se muestra al teclear), crea la cuenta de alice con <code>/newuser</code> —el servidor genera una clave inicial aleatoria de un solo uso— y lista las cuentas con <code>/accounts</code>.</span>
-            <span lang="en"><strong>Admin console.</strong> <code>the_river_admin</code> connects through the same SOCKS5 proxy (the key is not echoed), creates alice's account with <code>/newuser</code> —the server generates a random one-time initial key— and lists accounts with <code>/accounts</code>.</span></figcaption>
+            <span lang="es"><strong>Administración.</strong> Se crea una cuenta y se consulta la lista de usuarios.</span>
+            <span lang="en"><strong>Administration.</strong> An account is created and the user list is opened.</span></figcaption>
         </figure>
         <figure class="clip wide">
           <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/chat.jpg" aria-describedby="cap-chat">
@@ -115,8 +109,8 @@
             <source src="media/chat.webm" type="video/webm">
           </video>
           <figcaption id="cap-chat"><span class="rec">REC 0:20</span>
-            <span lang="es"><strong>Sala.</strong> alice (izquierda) y bob (derecha) conversan en la sala. alice completa el nombre de bob con <kbd>Tab</kbd> y luego recupera su último mensaje con <kbd>↑</kbd> para corregir la hora antes de reenviarlo.</span>
-            <span lang="en"><strong>Room.</strong> alice (left) and bob (right) chat in the room. alice completes bob's name with <kbd>Tab</kbd>, then recalls her last message with <kbd>↑</kbd> to fix the time before sending it again.</span></figcaption>
+            <span lang="es"><strong>Sala.</strong> Alice y Bob conversan, completan nombres y recuperan mensajes.</span>
+            <span lang="en"><strong>Room.</strong> Alice and Bob chat, complete names, and recall messages.</span></figcaption>
         </figure>
         <figure class="clip wide">
           <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/private.jpg" aria-describedby="cap-private">
@@ -124,8 +118,8 @@
             <source src="media/private.webm" type="video/webm">
           </video>
           <figcaption id="cap-private"><span class="rec">REC 0:16</span>
-            <span lang="es"><strong>Privados cifrados de extremo a extremo.</strong> alice pide la huella de bob con <code>/fingerprint bob</code> y bob muestra la suya con <code>/fingerprint</code>: coinciden. Después alice escribe <code>/msg bob …</code> y bob contesta con <code>/r …</code>; las líneas <code>[PM]</code> viajan selladas con X25519 + AES-256-GCM y el servidor no puede leerlas.</span>
-            <span lang="en"><strong>End-to-end encrypted private messages.</strong> alice asks for bob's fingerprint with <code>/fingerprint bob</code> and bob shows his own with <code>/fingerprint</code>: they match. Then alice sends <code>/msg bob …</code> and bob replies with <code>/r …</code>; the <code>[PM]</code> lines travel sealed with X25519 + AES-256-GCM and the server cannot read them.</span></figcaption>
+            <span lang="es"><strong>Mensajes privados.</strong> Comparan sus huellas de clave y se escriben con cifrado de extremo a extremo.</span>
+            <span lang="en"><strong>Private messages.</strong> They compare key fingerprints and exchange end-to-end encrypted messages.</span></figcaption>
         </figure>
         <figure class="clip wide">
           <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/attachment.jpg" aria-describedby="cap-attachment">
@@ -133,8 +127,8 @@
             <source src="media/attachment.webm" type="video/webm">
           </video>
           <figcaption id="cap-attachment"><span class="rec">REC 0:24</span>
-            <span lang="es"><strong>Adjuntos.</strong> alice pulsa «Adjuntar», pega la ruta de <code>rio.png</code> en el selector de archivos del sistema (zenity) y la oferta <code>[IMG]</code> aparece en la sala. bob hace doble clic, pulsa «Previsualizar» y la imagen llega cifrada de extremo a extremo y se muestra en el cliente. Mientras el selector está abierto, la sesión de alice sigue conectada.</span>
-            <span lang="en"><strong>Attachments.</strong> alice clicks “Adjuntar” (Attach), pastes the path of <code>rio.png</code> into the system file picker (zenity) and the <code>[IMG]</code> offer shows up in the room. bob double-clicks it, presses “Previsualizar” (Preview) and the image arrives end-to-end encrypted and is shown in the client. alice's session stays connected while the picker is open.</span></figcaption>
+            <span lang="es"><strong>Adjuntos.</strong> Alice comparte una imagen y Bob la abre en el cliente.</span>
+            <span lang="en"><strong>Attachments.</strong> Alice shares an image and Bob opens it in the client.</span></figcaption>
         </figure>
       </div>
     </section>
@@ -143,38 +137,24 @@
       <h2 id="feat-title"><span lang="es">Cómo funciona</span><span lang="en">How it works</span></h2>
       <ul class="features">
         <li><span class="k"><span lang="es">Servicio oculto de Tor</span><span lang="en">Tor hidden service</span></span>
-          <span lang="es">El servidor solo escucha en <code>127.0.0.1</code> y se publica como <code>.onion</code>. Los clientes llegan por un circuito Tor: nadie ve la IP del servidor ni la tuya. El cliente de escritorio trae Tor incluido.</span>
-          <span lang="en">The server listens on <code>127.0.0.1</code> only and is published as a <code>.onion</code>. Clients arrive through a Tor circuit: nobody sees the server's IP or yours. The desktop client ships with Tor bundled.</span></li>
-        <li><span class="k"><span lang="es">Login SCRAM</span><span lang="en">SCRAM login</span></span>
-          <span lang="es">Autenticación mutua estilo SCRAM-SHA-256. La base de datos guarda claves derivadas, nunca la contraseña ni un hash que sirva para entrar.</span>
-          <span lang="en">Mutual SCRAM-SHA-256 style authentication. The database keeps derived keys, never the password or a hash that could be replayed to log in.</span></li>
-        <li><span class="k"><span lang="es">Privados y adjuntos E2E</span><span lang="en">E2E private messages and attachments</span></span>
-          <span lang="es">Cada usuario tiene una clave X25519. Los <code>/msg</code> y los archivos se sellan con AES-256-GCM para el destinatario: el servidor solo reenvía sobres que no puede abrir.</span>
-          <span lang="en">Each user has an X25519 key. <code>/msg</code> messages and files are sealed with AES-256-GCM for the recipient: the server only forwards envelopes it cannot open.</span></li>
-        <li><span class="k"><span lang="es">Huellas de clave</span><span lang="en">Key fingerprints</span></span>
-          <span lang="es">Las claves se fijan la primera vez que se ven (TOFU) y el cliente avisa si cambian. Compara <code>/fingerprint</code> con tu contacto por otro canal.</span>
-          <span lang="en">Keys are pinned on first sight (TOFU) and the client warns when they change. Compare <code>/fingerprint</code> with your contact over another channel.</span></li>
-        <li><span class="k"><span lang="es">Historial y privados offline</span><span lang="en">History and offline PMs</span></span>
-          <span lang="es">Al entrar recibes los últimos 100 mensajes de la sala. Los privados a alguien desconectado quedan en cola (cifrados) hasta 7 días.</span>
-          <span lang="en">On login you get the latest 100 room messages. Private messages to someone offline are queued (still encrypted) for up to 7 days.</span></li>
-        <li><span class="k"><span lang="es">Consola de administración</span><span lang="en">Admin console</span></span>
-          <span lang="es">Crear cuentas, expulsar, banear por usuario o HWID, anuncios y <code>/whois</code> con huella, desde <code>the_river_admin</code>.</span>
-          <span lang="en">Create accounts, kick, ban by user or HWID, announcements and <code>/whois</code> with fingerprint, from <code>the_river_admin</code>.</span></li>
-        <li><span class="k">Windows / Linux / Termux</span>
-          <span lang="es">El código contempla clientes para Windows y Linux x86_64; en Android se compila dentro de Termux y corre en Termux:X11 con una vista compacta.</span>
-          <span lang="en">The code includes clients for Windows and Linux x86_64; on Android it builds inside Termux and runs in Termux:X11 with a compact layout.</span></li>
-        <li><span class="k"><span lang="es">Retro a propósito</span><span lang="en">Retro on purpose</span></span>
-          <span lang="es">Negro, azul BBS, magenta y lima. Comandos con <kbd>/</kbd>, historial con <kbd>↑</kbd>/<kbd>↓</kbd>, autocompletado con <kbd>Tab</kbd>. Interfaz en español o inglés.</span>
-          <span lang="en">Black, BBS blue, magenta and lime. Slash commands, <kbd>↑</kbd>/<kbd>↓</kbd> history, <kbd>Tab</kbd> completion. Spanish or English interface.</span></li>
+          <span lang="es">El servidor se publica como servicio <code>.onion</code>.</span>
+          <span lang="en">The server is published as an <code>.onion</code> service.</span></li>
+        <li><span class="k"><span lang="es">Mensajes privados</span><span lang="en">Private messages</span></span>
+          <span lang="es">Mensajes y archivos cifrados de extremo a extremo.</span>
+          <span lang="en">End-to-end encrypted messages and files.</span></li>
+        <li><span class="k"><span lang="es">Sala e historial</span><span lang="en">Room and history</span></span>
+          <span lang="es">Conversación compartida y recuperación de mensajes recientes.</span>
+          <span lang="en">Shared conversation and recent message history.</span></li>
+        <li><span class="k"><span lang="es">Cliente y administración</span><span lang="en">Client and administration</span></span>
+          <span lang="es">Interfaz gráfica y consola para gestionar las cuentas.</span>
+          <span lang="en">Graphical client and a console for managing accounts.</span></li>
       </ul>
     </section>
 
     <section aria-labelledby="project-title">
       <h2 id="project-title"><span lang="es">Estado del proyecto</span><span lang="en">Project status</span></h2>
-      <p lang="es">Los vídeos documentan el prototipo del protocolo 2. El código, las pruebas y los cambios en curso se pueden revisar en <a href="https://github.com/jhulio435m/the_river/pull/1">el pull request</a>. La <a href="security.html">página de seguridad</a> explica también sus límites.</p>
-      <p lang="en">The videos document the protocol 2 prototype. The code, tests, and ongoing changes are available in <a href="https://github.com/jhulio435m/the_river/pull/1">the pull request</a>. The <a href="security.html">security page</a> also explains its limits.</p>
-      <p lang="es">La <a href="download.html">página de versiones</a> enlaza al último release publicado, que puede ser anterior a lo que se ve aquí.</p>
-      <p lang="en">The <a href="download.html">versions page</a> links to the latest published release, which may predate what is shown here.</p>
+      <p lang="es">El prototipo del protocolo 2 está en <a href="https://github.com/jhulio435m/the_river/pull/1">el pull request</a>. Consulta el <a href="security.html">modelo de seguridad</a> o las <a href="download.html">versiones publicadas</a>.</p>
+      <p lang="en">The protocol 2 prototype is in <a href="https://github.com/jhulio435m/the_river/pull/1">the pull request</a>. See the <a href="security.html">security model</a> or the <a href="download.html">published versions</a>.</p>
     </section>
 
   </main>

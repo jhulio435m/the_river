@@ -28,6 +28,7 @@ CirculoServer/
 # Local IDE/system files
 .DS_Store
 .vs/
+.wrangler/
 ipch/
 *.opensdf
 *.sdf

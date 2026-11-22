@@ -12,7 +12,7 @@ site/
   assets/
     style.css     shared styles (BBS palette: black, #0000A8 blue, magenta, lime, white)
     site.js       ES/EN toggle (saved in localStorage), terminal animation, footer clock
-    favicon.svg
+    logo.svg        connected-nodes mark used in the header and browser tab
   media/          real screen recordings of the client (mp4 + webm + jpg poster)
   robots.txt      crawler policy and sitemap location
   sitemap.xml     public page URLs at theriver.soryntel.com

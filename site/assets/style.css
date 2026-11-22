@@ -62,9 +62,11 @@ a:hover { color: var(--white); background: var(--blue); }
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px;
 }
 .brand {
+  display: inline-flex; align-items: center; gap: 8px;
   color: var(--white); text-decoration: none; font-weight: bold; white-space: nowrap;
   font-size: 16px; margin-right: auto;
 }
+.brand img { display: block; width: 26px; height: 26px; flex: none; }
 .brand:hover { background: transparent; color: var(--lime); }
 .brand .heart { color: var(--white); }
 .nav { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
