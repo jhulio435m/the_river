@@ -1,9 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
+#include <ctime>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "common/net_platform.h"
 #include "server/user_repository.h"
@@ -14,6 +18,13 @@ public:
     int Run();
 
 private:
+    // Serializes writes to one socket and guards against using a descriptor
+    // after its owning handler thread has closed it (descriptor reuse).
+    struct SocketChannel {
+        std::mutex mutex;
+        bool closed = false;
+    };
+
     struct ClientSession {
         SocketHandle socket = kInvalidSocket;
         std::string nick;
@@ -22,6 +33,7 @@ private:
         bool auth = false;
         bool isAdmin = false;
         time_t lastSeen = 0;
+        time_t connectedAt = 0;
     };
 
     enum class LoginCode {
@@ -40,12 +52,19 @@ private:
     void HandleClient(SocketHandle clientSocket);
     void HeartbeatLoop();
     bool SendLine(SocketHandle sock, const std::string& msg);
+    bool SendFrameLocked(SocketHandle sock, std::uint16_t type, const std::string& payload);
+    void RegisterSocket(SocketHandle sock);
+    void UnregisterSocket(SocketHandle sock);
+    std::shared_ptr<SocketChannel> ChannelFor(SocketHandle sock);
+    void ShutdownSocket(SocketHandle sock);
+    void RegisterAuthenticatedSession(const ClientSession& session);
     void Broadcast(const std::string& msg);
     void BroadcastUsers();
     bool SendDirectLineToUser(const std::string& toNick, const std::string& line);
     bool SendPrivateMessage(const std::string& toNick, const std::string& fromNick, const std::string& encPayload);
     bool RelayAttachmentChunk(const std::string& fromNick, const std::string& payload);
     bool KickUser(const std::string& nick, const std::string& reason);
+    bool DescribeUser(const std::string& nick, ClientSession& session);
     void DisconnectByHwid(const std::string& hwid, const std::string& reason);
     void HandleAdminCommand(SocketHandle clientSocket, const ClientSession& currentClient, const std::string& command);
     void LogEncryptedMessage(const std::string& user, const std::string& encryptedPayload);
@@ -67,7 +86,10 @@ private:
     std::map<std::string, int> loginFailures_;
     std::map<std::string, int> loginFailuresByOrigin_;
     std::map<std::string, time_t> loginLocksByOrigin_;
+    std::map<SocketHandle, std::shared_ptr<SocketChannel>> channels_;
+    std::atomic<int> openConnections_{0};
     std::mutex clientsMutex_;
+    std::mutex channelsMutex_;
     std::mutex attemptsMutex_;
     std::mutex logMutex_;
 };

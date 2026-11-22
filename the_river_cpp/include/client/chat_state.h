@@ -37,6 +37,8 @@ public:
     void ClearLastError();
     std::string CurrentIdentity() const;
     void SetCurrentIdentity(const std::string& user);
+    std::string LastPrivatePeer() const;
+    void SetLastPrivatePeer(const std::string& user);
 
     bool ConsumeNewMessageFlag();
     void MarkNewMessage();
@@ -51,6 +53,8 @@ public:
                                const std::string& attachmentId,
                                AttachmentTransferState state,
                                const std::string& localPath = "");
+    // Marks every attachment still waiting for data as failed (e.g. after the link drops).
+    void FailRequestedAttachments();
     void ClearLogs();
 
     std::vector<LogEntry> SnapshotLogs() const;
@@ -72,6 +76,7 @@ private:
     std::string statusDetail_;
     std::string lastError_;
     std::string currentIdentity_;
+    std::string lastPrivatePeer_;
 
     mutable std::mutex chatMutex_;
     std::deque<LogEntry> chatLogs_;

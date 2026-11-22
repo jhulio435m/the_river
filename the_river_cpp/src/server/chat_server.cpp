@@ -24,6 +24,57 @@ constexpr int kLoginChallengeTtlSeconds = 60;
 constexpr int kMaxLinesPerMinute = 120;
 constexpr int kMaxMessagesPerMinute = 60;
 constexpr int kMaxAttachmentsPerMinute = 12;
+// Each binary chunk carries up to 32 KiB, so a 12 MiB file needs ~384 frames.
+// Chunks have their own budget so large files are not rejected by the offer limit.
+constexpr int kMaxAttachmentChunksPerMinute = 1200;
+constexpr int kMaxConcurrentConnections = 256;
+constexpr int kSocketRecvTimeoutSeconds = 120;
+constexpr int kSocketSendTimeoutSeconds = 30;
+
+void ApplySocketTimeouts(SocketHandle sock) {
+#ifdef _WIN32
+    DWORD recvTimeout = kSocketRecvTimeoutSeconds * 1000;
+    DWORD sendTimeout = kSocketSendTimeoutSeconds * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeout), sizeof(recvTimeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sendTimeout), sizeof(sendTimeout));
+#else
+    timeval recvTimeout{};
+    recvTimeout.tv_sec = kSocketRecvTimeoutSeconds;
+    timeval sendTimeout{};
+    sendTimeout.tv_sec = kSocketSendTimeoutSeconds;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, sizeof(recvTimeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
+#endif
+}
+
+std::string FormatTimestamp(time_t value) {
+    if (value <= 0) return "-";
+    char ts[32];
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&value));
+    return ts;
+}
+
+std::string FormatDuration(time_t seconds) {
+    if (seconds < 0) seconds = 0;
+    const long long h = static_cast<long long>(seconds) / 3600;
+    const long long m = (static_cast<long long>(seconds) % 3600) / 60;
+    const long long sec = static_cast<long long>(seconds) % 60;
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%lldh %02lldm %02llds", h, m, sec);
+    return buf;
+}
+
+std::string RestAfterToken(const std::string& command, std::size_t tokenIndex) {
+    std::size_t pos = 0;
+    for (std::size_t i = 0; i < tokenIndex; ++i) {
+        pos = command.find_first_not_of(" \t", pos);
+        if (pos == std::string::npos) return "";
+        pos = command.find_first_of(" \t", pos);
+        if (pos == std::string::npos) return "";
+    }
+    pos = command.find_first_not_of(" \t", pos);
+    return pos == std::string::npos ? "" : command.substr(pos);
+}
 
 bool StartsWith(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
@@ -119,10 +170,85 @@ void AppendSizedString(std::string& out, const std::string& value) {
 ChatServer::ChatServer(const std::string& dbPath, const std::string& logPath)
     : dbPath_(dbPath), logPath_(logPath) {}
 
-bool ChatServer::SendLine(SocketHandle sock, const std::string& msg) {
-    const bool ok = ::SendLine(sock, msg);
+void ChatServer::RegisterSocket(SocketHandle sock) {
+    std::lock_guard<std::mutex> lk(channelsMutex_);
+    channels_[sock] = std::make_shared<SocketChannel>();
+}
+
+void ChatServer::UnregisterSocket(SocketHandle sock) {
+    std::shared_ptr<SocketChannel> channel;
+    {
+        std::lock_guard<std::mutex> lk(channelsMutex_);
+        auto it = channels_.find(sock);
+        if (it != channels_.end()) {
+            channel = it->second;
+            channels_.erase(it);
+        }
+    }
+    if (channel) {
+        // Wait for in-flight writers, then mark closed so late writers never
+        // touch a descriptor number that the OS may hand to a new client.
+        std::lock_guard<std::mutex> guard(channel->mutex);
+        channel->closed = true;
+        CloseSocketHandle(sock);
+    } else {
+        CloseSocketHandle(sock);
+    }
+}
+
+std::shared_ptr<ChatServer::SocketChannel> ChatServer::ChannelFor(SocketHandle sock) {
+    std::lock_guard<std::mutex> lk(channelsMutex_);
+    auto it = channels_.find(sock);
+    return it == channels_.end() ? nullptr : it->second;
+}
+
+void ChatServer::ShutdownSocket(SocketHandle sock) {
+    std::shared_ptr<SocketChannel> channel = ChannelFor(sock);
+    if (!channel) return;
+    std::lock_guard<std::mutex> guard(channel->mutex);
+    if (channel->closed) return;
+    // Only shut the stream down; the owning handler thread performs the close.
+#ifdef _WIN32
+    shutdown(sock, SD_BOTH);
+#else
+    shutdown(sock, SHUT_RDWR);
+#endif
+}
+
+bool ChatServer::SendFrameLocked(SocketHandle sock, std::uint16_t type, const std::string& payload) {
+    std::shared_ptr<SocketChannel> channel = ChannelFor(sock);
+    if (!channel) return false;
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> guard(channel->mutex);
+        if (channel->closed) return false;
+        ok = ::SendFrame(sock, type, payload);
+    }
     if (!ok) LogRuntime("NET", "send failed on socket " + std::to_string(sock));
     return ok;
+}
+
+bool ChatServer::SendLine(SocketHandle sock, const std::string& msg) {
+    return SendFrameLocked(sock, kFrameTypeText, msg);
+}
+
+void ChatServer::RegisterAuthenticatedSession(const ClientSession& session) {
+    std::vector<SocketHandle> replaced;
+    {
+        std::lock_guard<std::mutex> lk(clientsMutex_);
+        for (auto& [sock, cl] : clients_) {
+            if (sock != session.socket && cl.auth && cl.nick == session.nick) {
+                cl.auth = false;
+                replaced.push_back(sock);
+            }
+        }
+        clients_[session.socket] = session;
+    }
+    for (SocketHandle sock : replaced) {
+        LogRuntime("SEC", "Sesion previa de '" + session.nick + "' reemplazada por un nuevo inicio de sesion.");
+        SendLine(sock, "SYSTEM: SESION REEMPLAZADA. Tu identidad inicio sesion desde otra conexion.");
+        ShutdownSocket(sock);
+    }
 }
 
 void ChatServer::LogEncryptedMessage(const std::string& user, const std::string& encryptedPayload) {
@@ -227,7 +353,7 @@ bool ChatServer::RelayAttachmentChunk(const std::string& fromNick, const std::st
     std::lock_guard<std::mutex> lk(clientsMutex_);
     for (auto& [sock, cl] : clients_) {
         if (cl.auth && cl.nick == target) {
-            return SendFrame(sock, kFrameTypeAttachmentChunk, outbound);
+            return SendFrameLocked(sock, kFrameTypeAttachmentChunk, outbound);
         }
     }
     return false;
@@ -263,8 +389,19 @@ bool ChatServer::KickUser(const std::string& nick, const std::string& reason) {
     }
     if (!IsSocketValid(targetSock)) return false;
     SendLine(targetSock, "SYSTEM: KICKED BY ADMIN. " + reason);
-    CloseSocketHandle(targetSock);
+    ShutdownSocket(targetSock);
     return true;
+}
+
+bool ChatServer::DescribeUser(const std::string& nick, ClientSession& session) {
+    std::lock_guard<std::mutex> lk(clientsMutex_);
+    for (const auto& [sock, cl] : clients_) {
+        if (cl.auth && cl.nick == nick) {
+            session = cl;
+            return true;
+        }
+    }
+    return false;
 }
 
 void ChatServer::DisconnectByHwid(const std::string& hwid, const std::string& reason) {
@@ -278,7 +415,7 @@ void ChatServer::DisconnectByHwid(const std::string& hwid, const std::string& re
     }
     for (SocketHandle sock : targets) {
         SendLine(sock, "SYSTEM: ACCESO BLOQUEADO. " + reason);
-        CloseSocketHandle(sock);
+        ShutdownSocket(sock);
     }
 }
 
@@ -419,7 +556,158 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
         SendLine(
             clientSocket,
             "SYSTEM: /newuser | /passwd <user> <new-key> | /banhwid <hwid> [reason] | "
-            "/unbanhwid <hwid> | /users | /kick <user>");
+            "/unbanhwid <hwid> | /banuser <user> [reason] | /bans | /users | /accounts | "
+            "/whois <user> | /kick <user> [reason] | /resethwid <user> | /deluser <user> | "
+            "/announce <text>");
+        return;
+    }
+
+    if (parts[0] == "/whois") {
+        if (parts.size() < 2) {
+            SendLine(clientSocket, "SYSTEM: Uso: /whois <user>");
+            return;
+        }
+        ClientSession target;
+        if (DescribeUser(parts[1], target)) {
+            const time_t now = time(nullptr);
+            SendLine(clientSocket,
+                     "SYSTEM: WHOIS " + target.nick +
+                         " | conectado | admin=" + (target.isAdmin ? "si" : "no") +
+                         " | hwid=" + (target.hwid.empty() ? "-" : target.hwid) +
+                         " | sesion=" + FormatDuration(now - target.connectedAt) +
+                         " | ultima actividad hace " + FormatDuration(now - target.lastSeen));
+            return;
+        }
+        UserRecord record = repo_.FindUserByUsername(parts[1]);
+        if (!record.found) {
+            SendLine(clientSocket, "SYSTEM: Usuario '" + parts[1] + "' no existe.");
+            return;
+        }
+        SendLine(clientSocket,
+                 "SYSTEM: WHOIS " + parts[1] +
+                     " | desconectado | admin=" + (record.isAdmin ? "si" : "no") +
+                     " | primer_acceso=" + (record.firstLogin ? "pendiente" : "completado") +
+                     " | hwid=" + (record.hwid.empty() ? "-" : record.hwid));
+        return;
+    }
+
+    if (parts[0] == "/accounts") {
+        const std::vector<UserSummary> users = repo_.ListUsers();
+        std::string line = "SYSTEM: Cuentas registradas (" + std::to_string(users.size()) + "): ";
+        bool first = true;
+        for (const auto& user : users) {
+            if (!first) line += ", ";
+            line += user.username;
+            if (user.isAdmin) line += " [admin]";
+            if (user.firstLoginPending) line += " [pendiente]";
+            if (!user.hwidBound && !user.isAdmin) line += " [sin hwid]";
+            first = false;
+        }
+        SendLine(clientSocket, line);
+        return;
+    }
+
+    if (parts[0] == "/bans") {
+        const std::vector<BannedHwidRecord> bans = repo_.ListBannedHwids();
+        if (bans.empty()) {
+            SendLine(clientSocket, "SYSTEM: No hay HWIDs baneados.");
+            return;
+        }
+        SendLine(clientSocket, "SYSTEM: HWIDs baneados (" + std::to_string(bans.size()) + "):");
+        for (const auto& ban : bans) {
+            SendLine(clientSocket,
+                     "SYSTEM:   " + ban.hwid + " | " + FormatTimestamp(static_cast<time_t>(ban.bannedAt)) +
+                         " | " + (ban.reason.empty() ? "-" : ban.reason));
+        }
+        return;
+    }
+
+    if (parts[0] == "/banuser") {
+        if (parts.size() < 2) {
+            SendLine(clientSocket, "SYSTEM: Uso: /banuser <user> [razon]");
+            return;
+        }
+        if (parts[1] == river::AdminUsername()) {
+            SendLine(clientSocket, "SYSTEM: No se puede banear al admin.");
+            return;
+        }
+        std::string hwid;
+        ClientSession target;
+        if (DescribeUser(parts[1], target)) {
+            if (target.isAdmin) {
+                SendLine(clientSocket, "SYSTEM: No se puede banear a un admin.");
+                return;
+            }
+            hwid = target.hwid;
+        } else {
+            UserRecord record = repo_.FindUserByUsername(parts[1]);
+            if (!record.found) {
+                SendLine(clientSocket, "SYSTEM: Usuario '" + parts[1] + "' no existe.");
+                return;
+            }
+            if (record.isAdmin) {
+                SendLine(clientSocket, "SYSTEM: No se puede banear a un admin.");
+                return;
+            }
+            hwid = record.hwid;
+        }
+        if (hwid.empty()) {
+            SendLine(clientSocket, "SYSTEM: El usuario '" + parts[1] + "' no tiene HWID asociado todavia.");
+            return;
+        }
+        std::string reason = RestAfterToken(command, 2);
+        if (reason.empty()) reason = "ban administrativo de " + parts[1];
+        if (repo_.BanHwid(hwid, reason)) {
+            AuditAdminAction(currentClient.nick, "banuser", parts[1] + " " + hwid + " " + reason);
+            DisconnectByHwid(hwid, "HWID baneado.");
+            SendLine(clientSocket, "SYSTEM: Usuario " + parts[1] + " baneado (HWID " + hwid + ").");
+        } else {
+            SendLine(clientSocket, "SYSTEM: No se pudo banear al usuario.");
+        }
+        return;
+    }
+
+    if (parts[0] == "/resethwid") {
+        if (parts.size() < 2) {
+            SendLine(clientSocket, "SYSTEM: Uso: /resethwid <user>");
+            return;
+        }
+        if (repo_.ResetUserHwid(parts[1])) {
+            AuditAdminAction(currentClient.nick, "resethwid", parts[1]);
+            SendLine(clientSocket, "SYSTEM: HWID liberado para " + parts[1] + ". Se asociara en su proximo acceso.");
+        } else {
+            SendLine(clientSocket, "SYSTEM: No se pudo liberar el HWID de " + parts[1] + ".");
+        }
+        return;
+    }
+
+    if (parts[0] == "/deluser") {
+        if (parts.size() < 2) {
+            SendLine(clientSocket, "SYSTEM: Uso: /deluser <user>");
+            return;
+        }
+        if (parts[1] == river::AdminUsername() || parts[1] == currentClient.nick) {
+            SendLine(clientSocket, "SYSTEM: No se puede eliminar esa cuenta.");
+            return;
+        }
+        if (repo_.DeleteUser(parts[1])) {
+            AuditAdminAction(currentClient.nick, "deluser", parts[1]);
+            if (KickUser(parts[1], "Cuenta eliminada por admin.")) BroadcastUsers();
+            SendLine(clientSocket, "SYSTEM: Cuenta eliminada: " + parts[1]);
+        } else {
+            SendLine(clientSocket, "SYSTEM: No se pudo eliminar la cuenta " + parts[1] + ".");
+        }
+        return;
+    }
+
+    if (parts[0] == "/announce") {
+        const std::string text = RestAfterToken(command, 1);
+        if (text.empty()) {
+            SendLine(clientSocket, "SYSTEM: Uso: /announce <texto>");
+            return;
+        }
+        AuditAdminAction(currentClient.nick, "announce", text);
+        Broadcast("SYSTEM: [ANUNCIO] " + text);
         return;
     }
 
@@ -457,11 +745,8 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
             SendLine(clientSocket, "SYSTEM: Uso: /banhwid <hwid> [razon]");
             return;
         }
-        std::string reason = "ban administrativo";
-        if (parts.size() > 2) {
-            size_t reasonPos = command.find(parts[2]);
-            reason = reasonPos == std::string::npos ? reason : command.substr(reasonPos);
-        }
+        std::string reason = RestAfterToken(command, 2);
+        if (reason.empty()) reason = "ban administrativo";
         if (repo_.BanHwid(parts[1], reason)) {
             AuditAdminAction(currentClient.nick, "banhwid", parts[1] + " " + reason);
             DisconnectByHwid(parts[1], "HWID baneado.");
@@ -493,14 +778,16 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
 
     if (parts[0] == "/kick") {
         if (parts.size() < 2) {
-            SendLine(clientSocket, "SYSTEM: Uso: /kick <user>");
+            SendLine(clientSocket, "SYSTEM: Uso: /kick <user> [razon]");
             return;
         }
         if (parts[1] == river::AdminUsername()) {
             SendLine(clientSocket, "SYSTEM: No se puede expulsar al admin.");
             return;
         }
-        if (KickUser(parts[1], "Expulsado por admin.")) {
+        std::string kickReason = RestAfterToken(command, 2);
+        if (kickReason.empty()) kickReason = "Expulsado por admin.";
+        if (KickUser(parts[1], kickReason)) {
             AuditAdminAction(currentClient.nick, "kick", parts[1]);
             Broadcast("SYSTEM: [ADMIN] NODE " + parts[1] + " KICKED.");
             BroadcastUsers();
@@ -528,7 +815,7 @@ void ChatServer::HeartbeatLoop() {
         }
         for (SocketHandle sock : stale) {
             LogRuntime("HB", "Cliente " + std::to_string(sock) + " sin respuesta; cerrando.");
-            CloseSocketHandle(sock);
+            ShutdownSocket(sock);
         }
     }
 }
@@ -548,6 +835,7 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
     int linesInWindow = 0;
     int messagesInWindow = 0;
     int attachmentsInWindow = 0;
+    int attachmentChunksInWindow = 0;
     bool closeForRateLimit = false;
 
     auto resetRateWindowIfNeeded = [&]() {
@@ -557,9 +845,11 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
             linesInWindow = 0;
             messagesInWindow = 0;
             attachmentsInWindow = 0;
+            attachmentChunksInWindow = 0;
         }
     };
 
+    RegisterSocket(clientSocket);
     SendLine(clientSocket, "SYSTEM: UPLINK ESTABLISHED.");
 
     while (true) {
@@ -567,8 +857,14 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
         std::string raw;
         if (!RecvFrame(clientSocket, frameType, raw, 1024 * 1024)) break;
         resetRateWindowIfNeeded();
+        if (authed) {
+            std::lock_guard<std::mutex> lk(clientsMutex_);
+            auto it = clients_.find(clientSocket);
+            if (it != clients_.end()) it->second.lastSeen = time(nullptr);
+        }
         if (frameType == kFrameTypeAttachmentChunk) {
-            if (!authed || ++attachmentsInWindow > kMaxAttachmentsPerMinute || !RelayAttachmentChunk(currentNick, raw)) {
+            if (!authed || ++attachmentChunksInWindow > kMaxAttachmentChunksPerMinute ||
+                !RelayAttachmentChunk(currentNick, raw)) {
                 SendLine(clientSocket, "SYSTEM: ADJUNTO RECHAZADO.");
             }
             continue;
@@ -586,13 +882,11 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
             continue;
         }
 
-            if (authed) {
-                std::lock_guard<std::mutex> lk(clientsMutex_);
-                auto it = clients_.find(clientSocket);
-                if (it != clients_.end()) it->second.lastSeen = time(nullptr);
-            }
-
             if (raw == "PONG") continue;
+            if (raw == "PING") {
+                SendLine(clientSocket, "PONG");
+                continue;
+            }
 
             if (StartsWith(raw, "[LOGIN_INIT]:")) {
                 std::stringstream ss(raw.substr(13));
@@ -655,8 +949,17 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                     authed = true;
                     firstLoginPending = false;
                     {
-                        std::lock_guard<std::mutex> lk(clientsMutex_);
-                        clients_[clientSocket] = {clientSocket, user, hwid, sessionId, true, isAdmin, time(nullptr)};
+                        const time_t now = time(nullptr);
+                        ClientSession session;
+                        session.socket = clientSocket;
+                        session.nick = user;
+                        session.hwid = hwid;
+                        session.sessionId = sessionId;
+                        session.auth = true;
+                        session.isAdmin = isAdmin;
+                        session.lastSeen = now;
+                        session.connectedAt = now;
+                        RegisterAuthenticatedSession(session);
                     }
                     Broadcast(user + " se unió");
                     BroadcastUsers();
@@ -683,8 +986,17 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                     authed = true;
                     firstLoginPending = false;
                     {
-                        std::lock_guard<std::mutex> lk(clientsMutex_);
-                        clients_[clientSocket] = {clientSocket, newUser, currentHwid, sessionId, true, false, time(nullptr)};
+                        const time_t now = time(nullptr);
+                        ClientSession session;
+                        session.socket = clientSocket;
+                        session.nick = newUser;
+                        session.hwid = currentHwid;
+                        session.sessionId = sessionId;
+                        session.auth = true;
+                        session.isAdmin = false;
+                        session.lastSeen = now;
+                        session.connectedAt = now;
+                        RegisterAuthenticatedSession(session);
                     }
                     SendLine(clientSocket, "SYSTEM: ACTUALIZADO.");
                     SendLine(clientSocket, "SYSTEM: ACCESO CONCEDIDO.");
@@ -768,21 +1080,34 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                     SendLine(clientSocket, "SYSTEM: MENSAJE RECHAZADO POR AUTENTICACION.");
                     continue;
                 }
+                if (StartsWith(plainCheck, "/")) {
+                    // Never broadcast mistyped commands from regular users to the room.
+                    SendLine(clientSocket, "SYSTEM: Comando no disponible. Usa /help para ver los comandos.");
+                    continue;
+                }
                 LogEncryptedMessage(currentNick, payload);
                 Broadcast(currentNick + ":" + payload);
             }
         if (closeForRateLimit) break;
     }
 
+    bool replacedByNewerSession = false;
     {
         std::lock_guard<std::mutex> lk(clientsMutex_);
         clients_.erase(clientSocket);
+        for (const auto& [sock, cl] : clients_) {
+            if (cl.auth && cl.nick == currentNick) {
+                replacedByNewerSession = true;
+                break;
+            }
+        }
     }
-    if (!currentNick.empty() && authed) {
+    UnregisterSocket(clientSocket);
+    openConnections_.fetch_sub(1);
+    if (!currentNick.empty() && authed && !replacedByNewerSession) {
         Broadcast(currentNick + " salió");
         BroadcastUsers();
     }
-    CloseSocketHandle(clientSocket);
 }
 
 int ChatServer::Run() {
@@ -836,6 +1161,7 @@ int ChatServer::Run() {
     LogRuntime("CFG", "Admin predefinido: " + river::AdminUsername());
     LogRuntime("CFG", "Nuevo usuario por /newuser con clave inicial desde THE_RIVER_NEW_USER_PASSWORD.");
     LogRuntime("HB",  "Heartbeat cada 30s, timeout 90s.");
+    LogRuntime("NET", "Maximo de conexiones simultaneas: " + std::to_string(kMaxConcurrentConnections) + ".");
 
     std::thread(&ChatServer::HeartbeatLoop, this).detach();
 
@@ -844,6 +1170,15 @@ int ChatServer::Run() {
         socklen_t clientLen = sizeof(clientAddr);
         SocketHandle client = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
         if (!IsSocketValid(client)) continue;
+
+        if (openConnections_.load() >= kMaxConcurrentConnections) {
+            LogRuntime("NET", "Limite de conexiones alcanzado; rechazando cliente.");
+            ::SendLine(client, "SYSTEM: SERVIDOR SATURADO. Intenta mas tarde.");
+            CloseSocketHandle(client);
+            continue;
+        }
+        ApplySocketTimeouts(client);
+        openConnections_.fetch_add(1);
 
         char ip[INET_ADDRSTRLEN] = {0};
         inet_ntop(AF_INET, &clientAddr.sin_addr, ip, sizeof(ip));

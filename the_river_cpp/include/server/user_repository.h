@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <sqlite3.h>
 
@@ -10,6 +11,19 @@ struct UserRecord {
     bool isAdmin = false;
     int firstLogin = 0;
     std::string hwid;
+};
+
+struct BannedHwidRecord {
+    std::string hwid;
+    std::string reason;
+    long long bannedAt = 0;
+};
+
+struct UserSummary {
+    std::string username;
+    bool isAdmin = false;
+    bool firstLoginPending = false;
+    bool hwidBound = false;
 };
 
 class UserRepository {
@@ -34,6 +48,10 @@ public:
                             const std::string& newPassword);
     bool UserExists(const std::string& username);
     bool GetPasswordHash(const std::string& username, std::string& passwordHash);
+    bool ResetUserHwid(const std::string& username);
+    bool DeleteUser(const std::string& username);
+    std::vector<BannedHwidRecord> ListBannedHwids();
+    std::vector<UserSummary> ListUsers();
 
 private:
     int SchemaVersionLocked();

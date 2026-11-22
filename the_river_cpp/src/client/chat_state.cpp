@@ -9,6 +9,22 @@
 #include "common/shared_config.h"
 #include "common/security_utils.h"
 
+namespace {
+
+constexpr std::size_t kMaxChatLogEntries = 1000;
+
+bool LooksLikeUsername(const std::string& value) {
+    if (value.size() < 3 || value.size() > 24) return false;
+    for (unsigned char c : value) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 ChatState::ChatState() = default;
 
 ConnState ChatState::GetConnectionState() const {
@@ -86,6 +102,16 @@ void ChatState::SetCurrentIdentity(const std::string& user) {
     currentIdentity_ = user;
 }
 
+std::string ChatState::LastPrivatePeer() const {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    return lastPrivatePeer_;
+}
+
+void ChatState::SetLastPrivatePeer(const std::string& user) {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    lastPrivatePeer_ = user;
+}
+
 bool ChatState::ConsumeNewMessageFlag() {
     return newMessage_.exchange(false);
 }
@@ -104,7 +130,7 @@ std::string ChatState::GetTimestamp() const {
 
 void ChatState::PushLogLocked(const LogEntry& entry) {
     chatLogs_.push_back(entry);
-    if (chatLogs_.size() > 200) chatLogs_.pop_front();
+    if (chatLogs_.size() > kMaxChatLogEntries) chatLogs_.pop_front();
 }
 
 void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::string& currentUser, bool isPm) {
@@ -129,13 +155,21 @@ void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::str
     std::lock_guard<std::mutex> chatLock(chatMutex_);
     const std::string timestamp = GetTimestamp();
 
-    if (msg.find(':') != std::string::npos && msg.find("SYSTEM") == std::string::npos) {
-        size_t sep = msg.find(':');
+    const std::size_t sep = msg.find(':');
+    const bool isSystemLine = msg.rfind("SYSTEM", 0) == 0;
+    if (!isSystemLine && sep != std::string::npos && LooksLikeUsername(msg.substr(0, sep))) {
         std::string user = msg.substr(0, sep);
         std::string payload = msg.substr(sep + 1);
 
         std::string dec;
         if (!river::OpenPayload(payload, dec)) dec = "[AUTH_ERR]";
+        if (isPm) {
+            dec = "[PM] " + dec;
+            if (user != currentUser) {
+                std::lock_guard<std::mutex> lock(uiStateMutex_);
+                lastPrivatePeer_ = user;
+            }
+        }
 
         PushLogLocked({timestamp, user, dec, false, isPm});
         if (user != currentUser) MarkNewMessage();
@@ -203,6 +237,14 @@ bool ChatState::UpdateAttachmentState(const std::string& user,
         }
     }
     return false;
+}
+
+void ChatState::FailRequestedAttachments() {
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    for (auto& entry : chatLogs_) {
+        if (entry.isAttachment && entry.attachment.state == AttachmentTransferState::Requested)
+            entry.attachment.state = AttachmentTransferState::Failed;
+    }
 }
 
 void ChatState::ClearLogs() {

@@ -13,7 +13,16 @@ UserRepository::~UserRepository() {
 bool UserRepository::Open(const std::string& dbPath) {
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ != nullptr) return true;
-    return sqlite3_open(dbPath.c_str(), &db_) == SQLITE_OK;
+    if (sqlite3_open(dbPath.c_str(), &db_) != SQLITE_OK) {
+        if (db_ != nullptr) {
+            sqlite3_close(db_);
+            db_ = nullptr;
+        }
+        return false;
+    }
+    // Tolerate brief concurrent access (e.g. check_db or backups) instead of failing instantly.
+    sqlite3_busy_timeout(db_, 3000);
+    return true;
 }
 
 void UserRepository::Close() {
@@ -332,4 +341,87 @@ bool UserRepository::CompleteFirstLogin(const std::string& oldUsername,
     bool ok = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db_) > 0;
     sqlite3_finalize(st);
     return ok;
+}
+
+bool UserRepository::ResetUserHwid(const std::string& username) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr || username.empty()) return false;
+
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_, "UPDATE users SET hwid=NULL WHERE username=?;", -1, &st, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return false;
+    }
+    sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db_) > 0;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool UserRepository::DeleteUser(const std::string& username) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr || username.empty()) return false;
+
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM users WHERE username=? AND is_admin=0;", -1, &st, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return false;
+    }
+    sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db_) > 0;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+std::vector<BannedHwidRecord> UserRepository::ListBannedHwids() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<BannedHwidRecord> records;
+    if (db_ == nullptr) return records;
+
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_,
+                           "SELECT hwid, COALESCE(reason, ''), COALESCE(banned_at, 0) "
+                           "FROM banned_hwids ORDER BY banned_at DESC;",
+                           -1, &st, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return records;
+    }
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        BannedHwidRecord record;
+        const unsigned char* hwid = sqlite3_column_text(st, 0);
+        const unsigned char* reason = sqlite3_column_text(st, 1);
+        record.hwid = hwid ? reinterpret_cast<const char*>(hwid) : "";
+        record.reason = reason ? reinterpret_cast<const char*>(reason) : "";
+        record.bannedAt = static_cast<long long>(sqlite3_column_int64(st, 2));
+        records.push_back(record);
+    }
+    sqlite3_finalize(st);
+    return records;
+}
+
+std::vector<UserSummary> UserRepository::ListUsers() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<UserSummary> users;
+    if (db_ == nullptr) return users;
+
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_,
+                           "SELECT username, is_admin, first_login, "
+                           "CASE WHEN hwid IS NULL OR hwid = '' THEN 0 ELSE 1 END "
+                           "FROM users ORDER BY username;",
+                           -1, &st, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return users;
+    }
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        UserSummary summary;
+        const unsigned char* name = sqlite3_column_text(st, 0);
+        summary.username = name ? reinterpret_cast<const char*>(name) : "";
+        summary.isAdmin = sqlite3_column_int(st, 1) == 1;
+        summary.firstLoginPending = sqlite3_column_int(st, 2) == 1;
+        summary.hwidBound = sqlite3_column_int(st, 3) == 1;
+        users.push_back(summary);
+    }
+    sqlite3_finalize(st);
+    return users;
 }

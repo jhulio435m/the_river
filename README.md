@@ -33,3 +33,26 @@ Generated binaries, databases, logs, and Tor runtime identity data are ignored b
 ## Privacy
 
 Before running anything, configure the private values documented in `the_river_cpp/PRIVACY_SETUP.md`. The code no longer ships with a hardcoded onion address, shared encryption key, admin bootstrap password, or default user password.
+
+## Commands
+
+### Client (GUI)
+
+| Command | Description |
+| --- | --- |
+| `/help` | List local commands. |
+| `/msg <user> <text>` (`/pm`, `/w`) | Send an encrypted private message. |
+| `/r <text>` | Reply to the last private conversation. |
+| `/users` (`/who`) | List active nodes. |
+| `/ping` | Measure round-trip latency to the server. |
+| `/clear` | Clear the local feed. |
+| `/logout` | Close the session and return to the login screen. |
+| `/adminhelp` | (Admins) Ask the server for the admin command list. |
+
+Composer shortcuts: `Up`/`Down` recall previously sent lines, `Tab` completes nicknames, and right-clicking a user in the node list offers *Private message* / *Copy name*.
+
+After a dropped link the client re-authenticates automatically with the credentials of the current session (kept only in memory). It does not do so after a kick, ban, `/logout` or when the same identity signs in from another connection.
+
+### Admin (server-side)
+
+`/newuser`, `/passwd <user> <key>`, `/users`, `/accounts`, `/whois <user>`, `/kick <user> [reason]`, `/banhwid <hwid> [reason]`, `/banuser <user> [reason]`, `/unbanhwid <hwid>`, `/bans`, `/resethwid <user>`, `/deluser <user>`, `/announce <text>`. The admin console also supports `/msg <user> <text>`.

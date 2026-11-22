@@ -132,6 +132,12 @@ void AppendSizedString(std::string& out, const std::string& value) {
     out.append(value);
 }
 
+// Server control lines always start with "SYSTEM:"; matching only those keeps
+// chat text or nicknames (e.g. "ACTUALIZADO se unio") from triggering state changes.
+bool IsSystemNotice(const std::string& line, const char* token) {
+    return line.rfind("SYSTEM:", 0) == 0 && line.find(token) != std::string::npos;
+}
+
 }  // namespace
 
 ChatClient::ChatClient(ChatState& state) : state_(state) {}
@@ -152,6 +158,100 @@ void ChatClient::Stop() {
     stopRequested_.store(true);
     CloseCurrentSocket();
     if (networkThread_.joinable()) networkThread_.join();
+    ReapFinishedUploads(true);
+}
+
+void ChatClient::Logout() {
+    ForgetSessionCredentials();
+    QueueAutoLogin("", "");
+    {
+        std::lock_guard<std::mutex> lock(reloginMutex_);
+        pendingLoginUser_.clear();
+        pendingLoginPass_.clear();
+    }
+    SetCurrentUser("");
+    state_.SetLastPrivatePeer("");
+    state_.AddSystemLog("SYSTEM: Sesion cerrada localmente.");
+    CloseCurrentSocket();
+}
+
+void ChatClient::RememberSessionCredentials() {
+    std::lock_guard<std::mutex> lock(reloginMutex_);
+    // After a first-login change the fresh credentials live in the auto-login queue.
+    if (!queuedLoginUser_.empty() && !queuedLoginPass_.empty()) {
+        rememberedUser_ = queuedLoginUser_;
+        rememberedPass_ = queuedLoginPass_;
+    } else if (!pendingLoginUser_.empty() && !pendingLoginPass_.empty()) {
+        rememberedUser_ = pendingLoginUser_;
+        rememberedPass_ = pendingLoginPass_;
+    }
+}
+
+void ChatClient::ForgetSessionCredentials() {
+    std::lock_guard<std::mutex> lock(reloginMutex_);
+    rememberedUser_.clear();
+    rememberedPass_.clear();
+}
+
+bool ChatClient::ConsumeRememberedCredentials(std::string& user, std::string& pass) {
+    std::lock_guard<std::mutex> lock(reloginMutex_);
+    if (rememberedUser_.empty() || rememberedPass_.empty()) return false;
+    user = rememberedUser_;
+    pass = rememberedPass_;
+    return true;
+}
+
+void ChatClient::HandleServerPong() {
+    std::lock_guard<std::mutex> lock(pingMutex_);
+    if (!pingOutstanding_) return;
+    pingOutstanding_ = false;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - pingSentAt_).count();
+    state_.AddSystemLog("SYSTEM: PONG recibido. Latencia ida y vuelta: " + std::to_string(elapsed) + " ms.");
+}
+
+void ChatClient::ReapFinishedUploads(bool joinAll) {
+    std::vector<std::thread> toJoin;
+    {
+        std::lock_guard<std::mutex> lock(uploadsMutex_);
+        for (auto it = uploads_.begin(); it != uploads_.end();) {
+            if (joinAll || it->done->load()) {
+                toJoin.push_back(std::move(it->thread));
+                it = uploads_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto& thread : toJoin) {
+        if (thread.joinable()) thread.join();
+    }
+}
+
+void ChatClient::StartAttachmentUpload(const std::string& requester,
+                                       const std::string& attachmentId,
+                                       const std::string& mode) {
+    ReapFinishedUploads(false);
+    // Uploads run off the receive thread so heartbeats and chat keep flowing
+    // while a large file streams to the requester.
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread worker([this, requester, attachmentId, mode, done]() {
+        HandleAttachmentRequest(requester, attachmentId, mode);
+        done->store(true);
+    });
+    std::lock_guard<std::mutex> lock(uploadsMutex_);
+    uploads_.push_back({std::move(worker), done});
+}
+
+void ChatClient::FailPendingIncomingAttachments(const std::string& reason) {
+    bool hadPending = false;
+    {
+        std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
+        hadPending = !incomingAttachments_.empty();
+        incomingAttachments_.clear();
+    }
+    state_.FailRequestedAttachments();
+    if (hadPending) state_.SetLastError(reason);
 }
 
 void ChatClient::SetCurrentUser(const std::string& user) {
@@ -272,7 +372,14 @@ bool ChatClient::SendFirstLoginChange(const std::string& newUser, const std::str
 }
 
 bool ChatClient::SendPing() {
+    {
+        std::lock_guard<std::mutex> lock(pingMutex_);
+        pingOutstanding_ = true;
+        pingSentAt_ = std::chrono::steady_clock::now();
+    }
     if (SendRawLine("PING\n") < 0) {
+        std::lock_guard<std::mutex> lock(pingMutex_);
+        pingOutstanding_ = false;
         state_.SetLastError("Could not send PING to the server.");
         return false;
     }
@@ -452,6 +559,7 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
     }
 
     for (std::size_t index = 0; index < totalChunks; ++index) {
+        if (stopRequested_.load()) return;
         std::string plainChunk;
         if (draft.sizeBytes > 0) {
             std::vector<char> buffer(kAttachmentBinaryChunkBytes);
@@ -523,7 +631,7 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
 bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const std::string& payload) {
     if (payload.rfind("@attachreq|", 0) == 0) {
         const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
-        if (parts.size() >= 3) HandleAttachmentRequest(sender, parts[1], parts[2]);
+        if (parts.size() >= 3) StartAttachmentUpload(sender, parts[1], parts[2]);
         return true;
     }
 
@@ -714,13 +822,15 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         if (line == "PING") {
             AppendClientLog("ReceiveLoop line=PING");
             SendRawLine("PONG\n");
+        } else if (line == "PONG") {
+            HandleServerPong();
         } else if (line.rfind("AUTH_CHALLENGE:", 0) == 0) {
             AppendClientLog("ReceiveLoop line=AUTH_CHALLENGE");
             if (!SendChallengeLogin(line)) {
                 state_.SetAuthActionPending(false);
                 state_.SetLastError("Could not complete authentication challenge.");
             }
-        } else if (line.find("FIRST LOGIN") != std::string::npos) {
+        } else if (IsSystemNotice(line, "FIRST LOGIN")) {
             AppendClientLog("ReceiveLoop line=FIRST LOGIN");
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
@@ -728,8 +838,18 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
             state_.SetStatusDetail("First access detected. You must change ID and key.");
             state_.ClearLastError();
-        } else if (line.find("ACCESO CONCEDIDO") != std::string::npos) {
+        } else if (IsSystemNotice(line, "ACCESO CONCEDIDO")) {
             AppendClientLog("ReceiveLoop line=ACCESO CONCEDIDO");
+            RememberSessionCredentials();
+            {
+                // After a first-login change the server knows us by the new identity.
+                std::string queuedUser;
+                {
+                    std::lock_guard<std::mutex> lock(reloginMutex_);
+                    queuedUser = queuedLoginUser_;
+                }
+                if (!queuedUser.empty()) SetCurrentUser(queuedUser);
+            }
             QueueAutoLogin("", "");
             state_.SetAuthenticated(true);
             state_.SetMustChangeCredentials(false);
@@ -741,18 +861,30 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         } else if (line.rfind("SESSION:", 0) == 0) {
             AppendClientLog("ReceiveLoop session=" + line.substr(8));
             state_.SetStatusDetail("Sesion segura activa.");
-        } else if (line.find("UPLINK ESTABLISHED") != std::string::npos) {
+        } else if (IsSystemNotice(line, "UPLINK ESTABLISHED")) {
             AppendClientLog("ReceiveLoop line=UPLINK ESTABLISHED");
             state_.SetConnectionState(ConnState::TOR_READY);
             state_.SetStatusDetail("Canal Tor establecido. Esperando login.");
             state_.ClearLastError();
+            {
+                // Keep the reason for a forced disconnect visible on the login screen.
+                std::lock_guard<std::mutex> lock(reloginMutex_);
+                if (!disconnectNotice_.empty()) {
+                    state_.SetLastError(disconnectNotice_);
+                    disconnectNotice_.clear();
+                }
+            }
             std::string queuedUser;
             std::string queuedPass;
             if (ConsumeQueuedAutoLogin(queuedUser, queuedPass)) {
                 AppendClientLog("ReceiveLoop auto-login user=" + queuedUser);
                 SendLogin(queuedUser, queuedPass);
+            } else if (ConsumeRememberedCredentials(queuedUser, queuedPass)) {
+                AppendClientLog("ReceiveLoop session-resume user=" + queuedUser);
+                state_.AddSystemLog("SYSTEM: Enlace restablecido. Reautenticando como " + queuedUser + "...");
+                SendLogin(queuedUser, queuedPass);
             }
-        } else if (line.find("ACTUALIZADO. RECONECTA") != std::string::npos) {
+        } else if (IsSystemNotice(line, "ACTUALIZADO. RECONECTA")) {
             AppendClientLog("ReceiveLoop line=ACTUALIZADO");
             state_.SetMustChangeCredentials(false);
             state_.SetAuthActionPending(false);
@@ -760,38 +892,55 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetConnectionState(ConnState::RECONNECTING);
             state_.SetStatusDetail("Credenciales actualizadas. Reautenticando en cuanto el canal vuelva a estar listo...");
             state_.ClearLastError();
-        } else if (line.find("ACTUALIZADO") != std::string::npos) {
+        } else if (IsSystemNotice(line, "ACTUALIZADO")) {
             AppendClientLog("ReceiveLoop line=ACTUALIZADO SIMPLE");
-            QueueAutoLogin("", "");
             state_.SetMustChangeCredentials(false);
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
             state_.SetStatusDetail("Credenciales actualizadas. Finalizando acceso...");
             state_.ClearLastError();
-        } else if (line.find("CREDENCIALES INCORRECTAS") != std::string::npos) {
+        } else if (IsSystemNotice(line, "CREDENCIALES INCORRECTAS")) {
             AppendClientLog("ReceiveLoop line=CREDENCIALES INCORRECTAS");
+            ForgetSessionCredentials();
             state_.SetAuthActionPending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
             state_.SetStatusDetail("Canal Tor listo. Esperando nuevas credenciales.");
             state_.SetLastError("Credenciales incorrectas.");
             state_.AddSystemLog("SYSTEM: CREDENCIALES INCORRECTAS.");
-        } else if (line.find("HWID NO RECONOCIDO") != std::string::npos) {
+        } else if (IsSystemNotice(line, "HWID NO RECONOCIDO")) {
             AppendClientLog("ReceiveLoop line=HWID NO RECONOCIDO");
+            ForgetSessionCredentials();
             state_.SetAuthActionPending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
             state_.SetStatusDetail("Canal Tor listo. Acceso denegado por HWID.");
             state_.SetLastError("Esta maquina no coincide con el HWID autorizado.");
             state_.AddSystemLog("SYSTEM: HWID NO RECONOCIDO.");
-        } else if (line.find("ACCESO BLOQUEADO") != std::string::npos) {
+        } else if (IsSystemNotice(line, "ACCESO BLOQUEADO")) {
             AppendClientLog("ReceiveLoop line=ACCESO BLOQUEADO");
+            ForgetSessionCredentials();
+            if (state_.IsAuthenticated()) {
+                std::lock_guard<std::mutex> lock(reloginMutex_);
+                disconnectNotice_ = line.substr(8);
+            }
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
             state_.SetStatusDetail("Canal Tor listo. Acceso bloqueado.");
             state_.SetLastError("Acceso bloqueado para esta maquina.");
             state_.AddSystemLog("SYSTEM: ACCESO BLOQUEADO.");
-        } else if (line.find("ERROR ACTUALIZANDO USUARIO") != std::string::npos) {
+        } else if (IsSystemNotice(line, "KICKED BY ADMIN") || IsSystemNotice(line, "SESION REEMPLAZADA")) {
+            AppendClientLog("ReceiveLoop line=SESSION TERMINATED");
+            // Do not silently fight the admin or a newer session of the same identity.
+            ForgetSessionCredentials();
+            {
+                std::lock_guard<std::mutex> lock(reloginMutex_);
+                disconnectNotice_ = line.substr(8);
+            }
+            state_.SetLastError(line.substr(8));
+            state_.AddSystemLog(line);
+        } else if (IsSystemNotice(line, "ERROR ACTUALIZANDO USUARIO")) {
             AppendClientLog("ReceiveLoop line=ERROR ACTUALIZANDO USUARIO");
+            QueueAutoLogin("", "");
             state_.SetCredentialChangePending(false);
             state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
             state_.SetStatusDetail("Could not complete the initial update.");
@@ -879,6 +1028,7 @@ void ChatClient::NetworkLoop() {
         state_.ClearLastError();
         ReceiveLoop(sock);
         CloseCurrentSocket();
+        FailPendingIncomingAttachments("Enlace perdido durante la transferencia del adjunto.");
         state_.SetAuthenticated(false);
         state_.SetConnectionState(ConnState::DISCONNECTED);
         state_.SetAuthActionPending(false);

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -22,6 +24,9 @@ public:
     bool SendLogin(const std::string& user, const std::string& pass);
     bool SendFirstLoginChange(const std::string& newUser, const std::string& newPass);
     bool SendPing();
+    // Drops the current session and forgets cached credentials so the client
+    // returns to the login screen instead of silently re-authenticating.
+    void Logout();
     bool SendChatMessage(const std::string& user, const std::string& input);
     bool SendPrivateMessage(const std::string& fromUser, const std::string& target, const std::string& message);
     bool SendAttachment(const std::string& fromUser, const AttachmentDraft& attachment);
@@ -53,6 +58,13 @@ private:
                                   int totalChunks,
                                   const std::string& encryptedChunk);
     void FinishIncomingAttachment(IncomingAttachmentTransfer transfer);
+    void StartAttachmentUpload(const std::string& requester, const std::string& attachmentId, const std::string& mode);
+    void ReapFinishedUploads(bool joinAll);
+    void FailPendingIncomingAttachments(const std::string& reason);
+    void HandleServerPong();
+    void RememberSessionCredentials();
+    void ForgetSessionCredentials();
+    bool ConsumeRememberedCredentials(std::string& user, std::string& pass);
     void CloseCurrentSocket();
     std::string CurrentUser() const;
     void SetCurrentUser(const std::string& user);
@@ -76,6 +88,20 @@ private:
     std::string queuedLoginPass_;
     std::string pendingLoginUser_;
     std::string pendingLoginPass_;
+    std::string rememberedUser_;
+    std::string rememberedPass_;
+    std::string disconnectNotice_;
+
+    std::mutex pingMutex_;
+    bool pingOutstanding_ = false;
+    std::chrono::steady_clock::time_point pingSentAt_{};
+
+    struct UploadWorker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    std::mutex uploadsMutex_;
+    std::vector<UploadWorker> uploads_;
 
     mutable std::mutex offeredAttachmentMutex_;
     std::map<std::string, AttachmentDraft> offeredAttachments_;

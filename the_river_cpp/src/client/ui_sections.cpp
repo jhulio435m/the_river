@@ -1,6 +1,7 @@
 #include "client/ui_sections.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -43,7 +44,96 @@ float ClampPanelWidth(float width, float desiredWidth) {
     return desiredWidth < maxWidth ? desiredWidth : maxWidth;
 }
 
+constexpr std::size_t kMaxInputHistory = 100;
+
+void ReplaceInputText(ImGuiInputTextCallbackData* data, const std::string& text) {
+    data->DeleteChars(0, data->BufTextLen);
+    data->InsertChars(0, text.c_str());
+    data->CursorPos = data->BufTextLen;
+    data->SelectionStart = data->SelectionEnd = data->CursorPos;
+}
+
+void HandleHistoryNavigation(ImGuiInputTextCallbackData* data, ClientUiState& uiState) {
+    if (uiState.inputHistory.empty()) return;
+    const int count = static_cast<int>(uiState.inputHistory.size());
+    const int previous = uiState.historyPos;
+    if (data->EventKey == ImGuiKey_UpArrow) {
+        if (uiState.historyPos == -1) {
+            uiState.historyDraft.assign(data->Buf, static_cast<std::size_t>(data->BufTextLen));
+            uiState.historyPos = count - 1;
+        } else if (uiState.historyPos > 0) {
+            --uiState.historyPos;
+        }
+    } else if (data->EventKey == ImGuiKey_DownArrow) {
+        if (uiState.historyPos != -1 && ++uiState.historyPos >= count) uiState.historyPos = -1;
+    }
+    if (previous == uiState.historyPos) return;
+    ReplaceInputText(data,
+                     uiState.historyPos == -1 ? uiState.historyDraft
+                                              : uiState.inputHistory[static_cast<std::size_t>(uiState.historyPos)]);
+}
+
+void HandleNicknameCompletion(ImGuiInputTextCallbackData* data, const ClientUiState& uiState) {
+    int wordStart = data->CursorPos;
+    while (wordStart > 0) {
+        const char c = data->Buf[wordStart - 1];
+        if (c == ' ' || c == '\t' || c == ',' || c == ';') break;
+        --wordStart;
+    }
+    const std::string prefix(data->Buf + wordStart, static_cast<std::size_t>(data->CursorPos - wordStart));
+    if (prefix.empty()) return;
+
+    auto toLower = [](std::string value) {
+        for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return value;
+    };
+    const std::string lowerPrefix = toLower(prefix);
+    std::vector<std::string> matches;
+    for (const auto& candidate : uiState.completionCandidates) {
+        if (toLower(candidate).rfind(lowerPrefix, 0) == 0) matches.push_back(candidate);
+    }
+    if (matches.empty()) return;
+
+    std::string completion = matches.front();
+    if (matches.size() > 1) {
+        // Complete up to the longest common prefix of every match.
+        std::size_t common = completion.size();
+        for (const auto& match : matches) {
+            std::size_t i = 0;
+            while (i < common && i < match.size() &&
+                   std::tolower(static_cast<unsigned char>(match[i])) ==
+                       std::tolower(static_cast<unsigned char>(completion[i]))) {
+                ++i;
+            }
+            common = i;
+        }
+        completion = completion.substr(0, common);
+        if (completion.size() <= prefix.size()) return;
+    } else {
+        completion += (wordStart == 0) ? ": " : " ";
+    }
+    data->DeleteChars(wordStart, data->CursorPos - wordStart);
+    data->InsertChars(wordStart, completion.c_str());
+}
+
 int CommandInputCallback(ImGuiInputTextCallbackData* data) {
+    ClientUiState* uiState = static_cast<ClientUiState*>(data->UserData);
+    if (uiState != nullptr) {
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
+            HandleHistoryNavigation(data, *uiState);
+            return 0;
+        }
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion) {
+            HandleNicknameCompletion(data, *uiState);
+            return 0;
+        }
+    }
+    if (uiState != nullptr && uiState->focusComposer && data->EventFlag == ImGuiInputTextFlags_CallbackAlways) {
+        // Text injected from a menu (e.g. "/msg user "): place the caret at the end, unselected.
+        data->CursorPos = data->BufTextLen;
+        data->SelectionStart = data->SelectionEnd = data->CursorPos;
+        uiState->focusComposer = false;
+    }
 #ifndef _WIN32
     const bool pasteRequested =
         (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) ||
@@ -295,6 +385,20 @@ bool RenderCopyableLine(const std::string& id, const std::string& text, const Im
         ImGui::EndPopup();
     }
     return clicked;
+}
+
+void RenderUserContextMenu(ClientUiState& uiState, const std::string& user, bool isMe) {
+    const std::string popupId = "##user_menu_" + user;
+    if (!ImGui::IsItemHovered() && !ImGui::IsPopupOpen(popupId.c_str())) return;
+    if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) ImGui::OpenPopup(popupId.c_str());
+    if (ImGui::BeginPopup(popupId.c_str())) {
+        if (!isMe && ImGui::Selectable(Tr(uiState, "Private message", "Mensaje privado"))) {
+            std::snprintf(uiState.input, sizeof(uiState.input), "/msg %s ", user.c_str());
+            uiState.focusComposer = true;
+        }
+        if (ImGui::Selectable(Tr(uiState, "Copy name", "Copiar nombre"))) ImGui::SetClipboardText(user.c_str());
+        ImGui::EndPopup();
+    }
 }
 
 void HandleAttachButton(ChatClient& client, ChatState& state, ClientUiState& uiState) {
@@ -646,6 +750,7 @@ void RenderAuthenticatedUi(ChatClient& client,
                 const std::string& user = activeUsers[index];
                 const bool isMe = (user == currentIdentity);
                 ImGui::TextColored(isMe ? palette.bbsMagenta : palette.bbsLime, "%s", user.c_str());
+                RenderUserContextMenu(uiState, user, isMe);
                 if (index + 1 < activeUsers.size()) ImGui::SameLine();
             }
             ImGui::EndChild();
@@ -660,6 +765,7 @@ void RenderAuthenticatedUi(ChatClient& client,
         for (const auto& user : activeUsers) {
             const bool isMe = (user == currentIdentity);
             ImGui::TextColored(isMe ? palette.bbsMagenta : palette.bbsLime, " %s", user.c_str());
+            RenderUserContextMenu(uiState, user, isMe);
         }
         ImGui::EndChild();
 
@@ -745,16 +851,28 @@ void RenderAuthenticatedUi(ChatClient& client,
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0, 0, 0, 1));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     ImGui::SetNextItemWidth(-1.0f);
-    if (!ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere(0);
+    uiState.completionCandidates = activeUsers;
+    if (!ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        ImGui::SetKeyboardFocusHere(0);
     if (ImGui::InputText("##CMD",
                          uiState.input,
-                         512,
-                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
-                         CommandInputCallback)) {
-        if (uiState.input[0] != '\0') {
-            ProcessLocalCommand(client, state, currentIdentity, uiState.input);
-            std::memset(uiState.input, 0, sizeof(uiState.input));
+                         sizeof(uiState.input),
+                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways |
+                             ImGuiInputTextFlags_CallbackHistory | ImGuiInputTextFlags_CallbackCompletion,
+                         CommandInputCallback,
+                         &uiState)) {
+        const std::string submitted = TrimCopy(uiState.input);
+        if (!submitted.empty()) {
+            if (uiState.inputHistory.empty() || uiState.inputHistory.back() != submitted) {
+                uiState.inputHistory.push_back(submitted);
+                if (uiState.inputHistory.size() > kMaxInputHistory)
+                    uiState.inputHistory.erase(uiState.inputHistory.begin());
+            }
+            uiState.historyPos = -1;
+            uiState.historyDraft.clear();
+            ProcessLocalCommand(client, state, currentIdentity, submitted);
         }
+        std::memset(uiState.input, 0, sizeof(uiState.input));
     }
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar();

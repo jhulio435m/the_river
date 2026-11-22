@@ -251,6 +251,20 @@ int main() {
         }
 
         std::vector<std::string> parts = SplitWhitespace(input);
+        if (!parts.empty() && (parts[0] == "/msg" || parts[0] == "/pm")) {
+            const std::size_t targetPos = input.find(parts.size() > 1 ? parts[1] : "", parts[0].size());
+            const std::size_t messagePos =
+                parts.size() > 2 ? input.find_first_not_of(" \t", targetPos + parts[1].size()) : std::string::npos;
+            if (parts.size() < 3 || messagePos == std::string::npos) {
+                std::cout << "\033[1;33mUso: /msg <usuario> <mensaje>\033[0m\n\033[1;32mADMIN>\033[0m ";
+                continue;
+            }
+            const std::string message = input.substr(messagePos);
+            SendAdminLine(adminSocket, "[PM]:" + parts[1] + ":" + adminUser + ":" + river::SealPayload(message));
+            std::cout << "\033[1;35m[PM -> " << parts[1] << "]:\033[0m " << message
+                      << "\n\033[1;32mADMIN>\033[0m ";
+            continue;
+        }
         if (parts.size() == 2 && parts[0] == "/passwd") {
             std::cout << "\033[1;33mNUEVA CLAVE PARA " << parts[1] << ": \033[0m";
             const std::string newPass = ReadSecretLine();

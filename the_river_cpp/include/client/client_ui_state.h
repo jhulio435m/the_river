@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "client/image_preview.h"
 
@@ -22,4 +23,11 @@ struct ClientUiState {
     std::string attachmentModalError;
     bool attachmentModalLoading = false;
     ImagePreviewTexture attachmentPreviewTexture;
+
+    // Composer helpers: sent-line history (Up/Down) and nickname completion (Tab).
+    std::vector<std::string> inputHistory;
+    int historyPos = -1;
+    std::string historyDraft;
+    std::vector<std::string> completionCandidates;
+    bool focusComposer = false;
 };
