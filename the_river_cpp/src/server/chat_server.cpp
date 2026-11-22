@@ -1468,12 +1468,13 @@ int ChatServer::Run() {
         std::cerr << "[NET] THE_RIVER_BIND_ADDR invalido: " << bindAddress << std::endl;
         return 1;
     }
-    addr.sin_port = htons(river::kServerPort);
+    const int listenPort = river::ServerPort();
+    addr.sin_port = htons(static_cast<std::uint16_t>(listenPort));
 
     int opt = 1;
     setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
     if (bind(serverSocket, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        std::cerr << "[NET] No se pudo hacer bind en " << bindAddress << ":" << river::kServerPort << std::endl;
+        std::cerr << "[NET] No se pudo hacer bind en " << bindAddress << ":" << listenPort << std::endl;
         return 1;
     }
     if (listen(serverSocket, 20) != 0) {
@@ -1481,7 +1482,7 @@ int ChatServer::Run() {
         return 1;
     }
 
-    LogRuntime("SYS", "THE RIVER SECURE SERVER ONLINE — " + bindAddress + ":" + std::to_string(river::kServerPort));
+    LogRuntime("SYS", "THE RIVER SECURE SERVER ONLINE — " + bindAddress + ":" + std::to_string(listenPort));
     LogRuntime("CFG", "Admin predefinido: " + river::AdminUsername());
     LogRuntime("CFG", "Nuevo usuario por /newuser con clave inicial desde THE_RIVER_NEW_USER_PASSWORD.");
     LogRuntime("HB",  "Heartbeat cada 30s, timeout 90s.");

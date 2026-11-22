@@ -81,7 +81,25 @@ std::string EnvOrDefault(const char* name, const char* fallback) {
     return value;
 }
 
+int PortOrDefault(const char* name, int fallback) {
+    const std::string value = EnvOrDefault(name, "");
+    if (value.empty() || value.size() > 5 ||
+        value.find_first_not_of("0123456789") != std::string::npos) {
+        return fallback;
+    }
+    const int port = std::stoi(value);
+    return (port >= 1 && port <= 65535) ? port : fallback;
+}
+
 }  // namespace
+
+int ServerPort() {
+    return PortOrDefault("THE_RIVER_PORT", kServerPort);
+}
+
+int TorProxyPort() {
+    return PortOrDefault("THE_RIVER_TOR_PROXY_PORT", kTorProxyPort);
+}
 
 std::string OnionAddress() {
     return EnvOrDefault("THE_RIVER_ONION", "");

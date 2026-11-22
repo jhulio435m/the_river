@@ -135,3 +135,26 @@ add_executable(river_integration_tests
 )
 target_link_libraries(river_integration_tests PRIVATE river_server_core)
 add_test(NAME river_integration_tests COMMAND river_integration_tests)
+
+# End-to-end tests (POSIX): drive the real server binary over TCP, and the real
+# ChatClient through a local SOCKS5 shim against fake servers and the real
+# server. No display or Tor needed; each picks free ports.
+if(UNIX)
+    add_executable(river_e2e_server_tests
+        tests/e2e_server_tests.cpp
+    )
+    target_link_libraries(river_e2e_server_tests PRIVATE river_common)
+    add_test(NAME river_e2e_server_tests
+        COMMAND river_e2e_server_tests $<TARGET_FILE:the_river_server>)
+
+    add_executable(river_e2e_client_tests
+        tests/e2e_client_tests.cpp
+    )
+    target_link_libraries(river_e2e_client_tests PRIVATE river_client_core)
+    add_test(NAME river_e2e_client_tests
+        COMMAND river_e2e_client_tests $<TARGET_FILE:the_river_server>)
+
+    set_tests_properties(river_e2e_server_tests river_e2e_client_tests PROPERTIES
+        TIMEOUT 60
+        LABELS e2e)
+endif()

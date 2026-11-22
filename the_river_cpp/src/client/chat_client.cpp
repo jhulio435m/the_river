@@ -1843,13 +1843,16 @@ void ChatClient::NetworkLoop() {
         state_.SetStatusDetail(hadIdentity ? "Restableciendo enlace Tor..." : "Conectando a la red Tor...");
         AppendClientLog("NetworkLoop CONNECTING");
 
+        const int proxyPort = river::TorProxyPort();
         TorEndpoint endpoint{
             river::kTorProxyIp,
-            river::kTorProxyPort,
+            proxyPort,
             river::OnionAddress(),
             static_cast<unsigned short>(river::kTorOnionPort)
         };
-        if (!IsTorProxyReachable(river::kTorProxyIp, river::kTorProxyPort)) {
+        // Auto-start only manages a Tor on the default SocksPort; with a custom
+        // THE_RIVER_TOR_PROXY_PORT the proxy is the user's responsibility.
+        if (proxyPort == river::kTorProxyPort && !IsTorProxyReachable(river::kTorProxyIp, proxyPort)) {
             AppendClientLog("NetworkLoop Tor proxy missing, attempting auto-start");
             EnsureLocalTorIsRunning();
         }
@@ -1857,8 +1860,8 @@ void ChatClient::NetworkLoop() {
         if (!IsSocketValid(sock)) {
             AppendClientLog("NetworkLoop ConnectViaTor failed");
             state_.SetConnectionState(ConnState::DISCONNECTED);
-            if (IsTermuxEnvironment() && !IsTorProxyReachable(river::kTorProxyIp, river::kTorProxyPort)) {
-                state_.SetStatusDetail("No local Tor proxy detected at 127.0.0.1:9050.");
+            if (IsTermuxEnvironment() && !IsTorProxyReachable(river::kTorProxyIp, proxyPort)) {
+                state_.SetStatusDetail("No local Tor proxy detected at 127.0.0.1:" + std::to_string(proxyPort) + ".");
                 state_.SetLastError(
                     "En Termux debes iniciar tor antes del cliente. Ejecuta el script run_termux_client.sh con --start-tor o arranca tor manualmente.");
             } else {

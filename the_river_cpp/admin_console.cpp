@@ -345,7 +345,7 @@ int main() {
 
     TorEndpoint endpoint{
         river::kTorProxyIp,
-        river::kTorProxyPort,
+        river::TorProxyPort(),
         river::OnionAddress(),
         (unsigned short)river::kTorOnionPort
     };
