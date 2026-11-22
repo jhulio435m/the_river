@@ -14,6 +14,8 @@ site/
     site.js       ES/EN toggle (saved in localStorage), terminal animation, footer clock
     favicon.svg
   media/          real screen recordings of the client (mp4 + webm + jpg poster)
+  robots.txt      crawler policy and sitemap location
+  sitemap.xml     public page URLs at theriver.soryntel.com
   _headers        Cloudflare Pages headers (CSP, nosniff, referrer, cache)
   deploy.sh       Cloudflare Pages deploy with wrangler
 ```
