@@ -121,8 +121,12 @@ bool IsEncryptionKeyStrong(const std::string& key) {
            key.find('\r') == std::string::npos;
 }
 
+// Protocol v2: clients (GUI and admin console) only need the onion address.
+// THE_RIVER_AES_KEY is server-only (at-rest encryption).
 bool HasRequiredClientConfig() {
-    return !OnionAddress().empty() && IsEncryptionKeyStrong(EncryptionKey());
+    const std::string onion = OnionAddress();
+    return !onion.empty() && onion.size() <= 255 &&
+           onion.find_first_of(" \t\r\n") == std::string::npos;
 }
 
 bool HasRequiredServerConfig() {

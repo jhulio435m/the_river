@@ -43,7 +43,19 @@ public:
     bool ConsumeNewMessageFlag();
     void MarkNewMessage();
 
-    void AddIncomingWireMessage(const std::string& rawMsg, const std::string& currentUser, bool isPm = false);
+    // Lines the client does not parse itself: [USERS] lists and server notices.
+    void AddIncomingWireMessage(const std::string& rawMsg);
+    // Room message (MSG / HIST). History entries already in the feed (same user,
+    // timestamp and text, e.g. after a reconnect) are skipped; returns false then.
+    bool AddRoomMessage(const std::string& user,
+                        const std::string& text,
+                        long long unixTs,
+                        bool fromHistory,
+                        const std::string& currentUser);
+    void AddIncomingPrivateMessage(const std::string& user,
+                                   const std::string& text,
+                                   long long unixTs,
+                                   const std::string& currentUser);
     void AddSystemLog(const std::string& message);
     void AddOutgoingChat(const std::string& user, const std::string& message);
     void AddOutgoingPrivateMessage(const std::string& user, const std::string& target, const std::string& message);
@@ -63,6 +75,7 @@ public:
 
 private:
     std::string GetTimestamp() const;
+    static std::string FormatTimestamp(long long unixTs);
     void PushLogLocked(const LogEntry& entry);
 
     std::atomic<int> connStateRaw_{0};

@@ -3,8 +3,47 @@
 #include <ctime>
 #include <iostream>
 
+#include "common/scram.h"
+#include "common/secure_envelope.h"
 #include "common/security_utils.h"
 #include "common/shared_config.h"
+
+namespace {
+
+// RAII wrapper so every early return finalizes the statement.
+class Stmt {
+public:
+    Stmt(sqlite3* db, const char* sql) {
+        if (sqlite3_prepare_v2(db, sql, -1, &st_, nullptr) != SQLITE_OK) {
+            sqlite3_finalize(st_);
+            st_ = nullptr;
+        }
+    }
+    ~Stmt() { sqlite3_finalize(st_); }
+    Stmt(const Stmt&) = delete;
+    Stmt& operator=(const Stmt&) = delete;
+    bool ok() const { return st_ != nullptr; }
+    sqlite3_stmt* get() const { return st_; }
+    void Text(int idx, const std::string& v) { sqlite3_bind_text(st_, idx, v.c_str(), -1, SQLITE_TRANSIENT); }
+    void Int64(int idx, long long v) { sqlite3_bind_int64(st_, idx, static_cast<sqlite3_int64>(v)); }
+    int Step() { return st_ ? sqlite3_step(st_) : SQLITE_ERROR; }
+    std::string ColText(int col) const {
+        const unsigned char* t = sqlite3_column_text(st_, col);
+        return t ? reinterpret_cast<const char*>(t) : "";
+    }
+    long long ColInt64(int col) const { return static_cast<long long>(sqlite3_column_int64(st_, col)); }
+
+private:
+    sqlite3_stmt* st_ = nullptr;
+};
+
+std::string MakeScramCredentialString(const std::string& password) {
+    river::scram::Credential credential;
+    if (!river::scram::MakeCredential(password, credential)) return "";
+    return river::scram::Serialize(credential);
+}
+
+}  // namespace
 
 UserRepository::~UserRepository() {
     Close();
@@ -62,19 +101,48 @@ bool UserRepository::SetSchemaVersionLocked(int version) {
 }
 
 bool UserRepository::EnsureDefaultAdminLocked() {
-    sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(
-        db_,
-        "INSERT OR IGNORE INTO users (username, password_hash, first_login, hwid, is_admin) "
-        "VALUES (?, ?, 0, NULL, 1);",
-        -1, &st, nullptr);
-    std::string adminHash = MakePasswordHash(river::AdminDefaultPassword());
     const std::string adminUsername = river::AdminUsername();
-    sqlite3_bind_text(st, 1, adminUsername.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 2, adminHash.c_str(), -1, SQLITE_TRANSIENT);
-    bool ok = sqlite3_step(st) == SQLITE_DONE;
-    sqlite3_finalize(st);
-    return ok;
+    if (UserExistsLocked(adminUsername)) return true;  // INSERT OR IGNORE semantics, skip PBKDF2
+    const std::string adminCredential = MakeScramCredentialString(river::AdminDefaultPassword());
+    if (adminCredential.empty()) return false;
+    Stmt st(db_,
+            "INSERT OR IGNORE INTO users (username, password_hash, first_login, hwid, is_admin) "
+            "VALUES (?, ?, 0, NULL, 1);");
+    if (!st.ok()) return false;
+    st.Text(1, adminUsername);
+    st.Text(2, adminCredential);
+    return st.Step() == SQLITE_DONE;
+}
+
+bool UserRepository::MigrateV1CredentialsLocked() {
+    // v1 stored "pbkdf2-sha256$iter$saltHex$hashHex" where hashHex is exactly the
+    // SCRAM SaltedPassword, so every row converts without user action.
+    std::vector<std::pair<std::string, std::string>> rows;
+    {
+        Stmt st(db_, "SELECT username, password_hash FROM users WHERE password_hash LIKE 'pbkdf2-sha256$%';");
+        if (!st.ok()) return false;
+        int rc;
+        while ((rc = st.Step()) == SQLITE_ROW) rows.emplace_back(st.ColText(0), st.ColText(1));
+        if (rc != SQLITE_DONE) return false;
+    }
+    for (const auto& [username, v1Hash] : rows) {
+        river::scram::Credential credential;
+        if (!river::scram::CredentialFromV1Hash(v1Hash, credential)) {
+            // Leave the row untouched: that account cannot log in until an admin
+            // runs /passwd, but one bad row must not keep the server down.
+            std::cerr << "[DB] No se pudo migrar la credencial v1 de '" << username
+                      << "'; requiere /passwd." << std::endl;
+            continue;
+        }
+        const std::string serialized = river::scram::Serialize(credential);
+        if (serialized.empty()) continue;
+        Stmt up(db_, "UPDATE users SET password_hash=? WHERE username=?;");
+        if (!up.ok()) return false;
+        up.Text(1, serialized);
+        up.Text(2, username);
+        if (up.Step() != SQLITE_DONE) return false;
+    }
+    return true;
 }
 
 bool UserRepository::InitSchema() {
@@ -127,37 +195,44 @@ bool UserRepository::InitSchema() {
         }
     }
 
+    if (!ExecSQLLocked(
+            "CREATE TABLE IF NOT EXISTS user_keys ("
+            "username TEXT PRIMARY KEY,"
+            "pubkey TEXT NOT NULL,"
+            "updated_at INTEGER NOT NULL"
+            ");") ||
+        !ExecSQLLocked(
+            "CREATE TABLE IF NOT EXISTS room_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "ts INTEGER NOT NULL,"
+            "from_user TEXT NOT NULL,"
+            "body TEXT NOT NULL"
+            ");") ||
+        !ExecSQLLocked(
+            "CREATE TABLE IF NOT EXISTS offline_pm ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "to_user TEXT NOT NULL,"
+            "from_user TEXT NOT NULL,"
+            "ts INTEGER NOT NULL,"
+            "envelope TEXT NOT NULL"
+            ");") ||
+        !ExecSQLLocked("CREATE INDEX IF NOT EXISTS idx_offline_pm_to ON offline_pm(to_user, id);")) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
+    }
+
+    if (SchemaVersionLocked() < 2) {
+        if (!MigrateV1CredentialsLocked() || !SetSchemaVersionLocked(2)) {
+            ExecSQLLocked("ROLLBACK;");
+            return false;
+        }
+    }
+
     if (!EnsureDefaultAdminLocked()) {
         ExecSQLLocked("ROLLBACK;");
         return false;
     }
     return ExecSQLLocked("COMMIT;");
-}
-
-UserRecord UserRepository::FindUserByCredentials(const std::string& username, const std::string& password) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    UserRecord record;
-    if (db_ == nullptr) return record;
-
-    sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(
-        db_,
-        "SELECT password_hash, first_login, hwid, is_admin FROM users WHERE username=?;",
-        -1, &st, nullptr);
-    sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(st) == SQLITE_ROW) {
-        const unsigned char* hash = sqlite3_column_text(st, 0);
-        const std::string storedHash = hash ? reinterpret_cast<const char*>(hash) : "";
-        if (VerifyPasswordHash(password, storedHash)) {
-            record.found = true;
-            record.firstLogin = sqlite3_column_int(st, 1);
-            const unsigned char* hwid = sqlite3_column_text(st, 2);
-            record.hwid = hwid ? reinterpret_cast<const char*>(hwid) : "";
-            record.isAdmin = sqlite3_column_int(st, 3) == 1;
-        }
-    }
-    sqlite3_finalize(st);
-    return record;
 }
 
 UserRecord UserRepository::FindUserByUsername(const std::string& username) {
@@ -255,20 +330,14 @@ bool UserRepository::UserExists(const std::string& username) {
     return UserExistsLocked(username);
 }
 
-bool UserRepository::GetPasswordHash(const std::string& username, std::string& passwordHash) {
+bool UserRepository::GetCredential(const std::string& username, river::scram::Credential& credential) {
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ == nullptr) return false;
-    sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(db_, "SELECT password_hash FROM users WHERE username=?;", -1, &st, nullptr);
-    sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    bool found = false;
-    if (sqlite3_step(st) == SQLITE_ROW) {
-        const unsigned char* hash = sqlite3_column_text(st, 0);
-        passwordHash = hash ? reinterpret_cast<const char*>(hash) : "";
-        found = !passwordHash.empty();
-    }
-    sqlite3_finalize(st);
-    return found;
+    Stmt st(db_, "SELECT password_hash FROM users WHERE username=?;");
+    if (!st.ok()) return false;
+    st.Text(1, username);
+    if (st.Step() != SQLITE_ROW) return false;
+    return river::scram::Parse(st.ColText(0), credential);
 }
 
 std::string UserRepository::NextSequentialUsernameLocked() {
@@ -291,7 +360,8 @@ bool UserRepository::CreateNextUser(std::string& createdUsername) {
 
     createdUsername = NextSequentialUsernameLocked();
     sqlite3_stmt* st = nullptr;
-    std::string passwordHash = MakePasswordHash(river::DefaultUserPassword());
+    std::string passwordHash = MakeScramCredentialString(river::DefaultUserPassword());
+    if (passwordHash.empty()) return false;
     sqlite3_prepare_v2(
         db_,
         "INSERT INTO users (username, password_hash, first_login, hwid, is_admin) "
@@ -309,7 +379,8 @@ bool UserRepository::ResetUserPassword(const std::string& username, const std::s
     if (db_ == nullptr || username.empty() || newPassword.empty()) return false;
 
     sqlite3_stmt* st = nullptr;
-    std::string passwordHash = MakePasswordHash(newPassword);
+    std::string passwordHash = MakeScramCredentialString(newPassword);
+    if (passwordHash.empty()) return false;
     sqlite3_prepare_v2(
         db_,
         "UPDATE users SET password_hash=?, first_login=0 WHERE username=?;",
@@ -321,26 +392,50 @@ bool UserRepository::ResetUserPassword(const std::string& username, const std::s
     return ok;
 }
 
-bool UserRepository::CompleteFirstLogin(const std::string& oldUsername,
-                                        const std::string& newUsername,
-                                        const std::string& newPassword) {
+bool UserRepository::CompleteFirstLoginWithCredential(const std::string& oldUsername,
+                                                      const std::string& newUsername,
+                                                      int iterations,
+                                                      const std::string& saltHex,
+                                                      const std::string& storedKeyHex,
+                                                      const std::string& serverKeyHex) {
+    river::scram::Credential credential;
+    if (!river::scram::CredentialFromParts(iterations, saltHex, storedKeyHex, serverKeyHex, credential))
+        return false;
+    const std::string serialized = river::scram::Serialize(credential);
+    if (serialized.empty()) return false;
+
     std::lock_guard<std::mutex> lk(mutex_);
-    if (db_ == nullptr || oldUsername.empty() || newUsername.empty() || newPassword.empty()) return false;
+    if (db_ == nullptr || oldUsername.empty() || newUsername.empty()) return false;
     if (newUsername != oldUsername && UserExistsLocked(newUsername)) return false;
 
-    sqlite3_stmt* st = nullptr;
-    std::string passwordHash = MakePasswordHash(newPassword);
-    sqlite3_prepare_v2(
-        db_,
-        "UPDATE users SET username=?, password_hash=?, first_login=0 "
-        "WHERE username=? AND is_admin=0;",
-        -1, &st, nullptr);
-    sqlite3_bind_text(st, 1, newUsername.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 2, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 3, oldUsername.c_str(), -1, SQLITE_TRANSIENT);
-    bool ok = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db_) > 0;
-    sqlite3_finalize(st);
-    return ok;
+    if (!ExecSQLLocked("BEGIN IMMEDIATE;")) return false;
+    bool ok = false;
+    {
+        Stmt st(db_,
+                "UPDATE users SET username=?, password_hash=?, first_login=0 "
+                "WHERE username=? AND is_admin=0;");
+        if (st.ok()) {
+            st.Text(1, newUsername);
+            st.Text(2, serialized);
+            st.Text(3, oldUsername);
+            ok = st.Step() == SQLITE_DONE && sqlite3_changes(db_) > 0;
+        }
+    }
+    // The renamed account starts fresh: nothing keyed by either name carries over.
+    for (const char* sql : {"DELETE FROM user_keys WHERE username=?;", "DELETE FROM offline_pm WHERE to_user=?;"}) {
+        for (const std::string* name : {&oldUsername, &newUsername}) {
+            if (!ok) break;
+            Stmt st(db_, sql);
+            if (!st.ok()) { ok = false; break; }
+            st.Text(1, *name);
+            ok = st.Step() == SQLITE_DONE;
+        }
+    }
+    if (!ok) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
+    }
+    return ExecSQLLocked("COMMIT;");
 }
 
 bool UserRepository::ResetUserHwid(const std::string& username) {
@@ -362,15 +457,27 @@ bool UserRepository::DeleteUser(const std::string& username) {
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ == nullptr || username.empty()) return false;
 
-    sqlite3_stmt* st = nullptr;
-    if (sqlite3_prepare_v2(db_, "DELETE FROM users WHERE username=? AND is_admin=0;", -1, &st, nullptr) != SQLITE_OK) {
-        sqlite3_finalize(st);
+    if (!ExecSQLLocked("BEGIN IMMEDIATE;")) return false;
+    bool ok = false;
+    {
+        Stmt st(db_, "DELETE FROM users WHERE username=? AND is_admin=0;");
+        if (st.ok()) {
+            st.Text(1, username);
+            ok = st.Step() == SQLITE_DONE && sqlite3_changes(db_) > 0;
+        }
+    }
+    for (const char* sql : {"DELETE FROM user_keys WHERE username=?;", "DELETE FROM offline_pm WHERE to_user=?;"}) {
+        if (!ok) break;
+        Stmt st(db_, sql);
+        if (!st.ok()) { ok = false; break; }
+        st.Text(1, username);
+        ok = st.Step() == SQLITE_DONE;
+    }
+    if (!ok) {
+        ExecSQLLocked("ROLLBACK;");
         return false;
     }
-    sqlite3_bind_text(st, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    bool ok = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db_) > 0;
-    sqlite3_finalize(st);
-    return ok;
+    return ExecSQLLocked("COMMIT;");
 }
 
 std::vector<BannedHwidRecord> UserRepository::ListBannedHwids() {
@@ -424,4 +531,187 @@ std::vector<UserSummary> UserRepository::ListUsers() {
     }
     sqlite3_finalize(st);
     return users;
+}
+
+KeySetResult UserRepository::SetUserKey(const std::string& username, const std::string& pubKeyB64) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr || username.empty() || pubKeyB64.empty()) return KeySetResult::Error;
+
+    std::string previous;
+    bool hadKey = false;
+    {
+        Stmt st(db_, "SELECT pubkey FROM user_keys WHERE username=?;");
+        if (!st.ok()) return KeySetResult::Error;
+        st.Text(1, username);
+        const int rc = st.Step();
+        if (rc == SQLITE_ROW) {
+            previous = st.ColText(0);
+            hadKey = true;
+        } else if (rc != SQLITE_DONE) {
+            return KeySetResult::Error;
+        }
+    }
+    if (hadKey && previous == pubKeyB64) return KeySetResult::Unchanged;
+
+    Stmt st(db_,
+            "INSERT INTO user_keys (username, pubkey, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(username) DO UPDATE SET pubkey=excluded.pubkey, updated_at=excluded.updated_at;");
+    if (!st.ok()) return KeySetResult::Error;
+    st.Text(1, username);
+    st.Text(2, pubKeyB64);
+    st.Int64(3, static_cast<long long>(time(nullptr)));
+    return st.Step() == SQLITE_DONE ? KeySetResult::Changed : KeySetResult::Error;
+}
+
+bool UserRepository::GetUserKey(const std::string& username, std::string& pubKeyB64) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr) return false;
+    Stmt st(db_, "SELECT pubkey FROM user_keys WHERE username=?;");
+    if (!st.ok()) return false;
+    st.Text(1, username);
+    if (st.Step() != SQLITE_ROW) return false;
+    pubKeyB64 = st.ColText(0);
+    return !pubKeyB64.empty();
+}
+
+bool UserRepository::AppendRoomMessage(const std::string& fromUser, long long ts, const std::string& textB64) {
+    const std::string sealed = river::SealPayload(textB64);
+    if (sealed.empty()) return false;
+
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr) return false;
+    if (!ExecSQLLocked("BEGIN IMMEDIATE;")) return false;
+    bool ok = false;
+    {
+        Stmt st(db_, "INSERT INTO room_history (ts, from_user, body) VALUES (?, ?, ?);");
+        if (st.ok()) {
+            st.Int64(1, ts);
+            st.Text(2, fromUser);
+            st.Text(3, sealed);
+            ok = st.Step() == SQLITE_DONE;
+        }
+    }
+    if (ok) {
+        Stmt st(db_,
+                "DELETE FROM room_history WHERE id NOT IN "
+                "(SELECT id FROM room_history ORDER BY id DESC LIMIT ?);");
+        ok = st.ok();
+        if (ok) {
+            st.Int64(1, kRoomHistoryKeep);
+            ok = st.Step() == SQLITE_DONE;
+        }
+    }
+    if (!ok) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
+    }
+    return ExecSQLLocked("COMMIT;");
+}
+
+std::vector<RoomMessage> UserRepository::RecentRoomMessages(int limit) {
+    std::vector<RoomMessage> out;
+    if (limit <= 0) return out;
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr) return out;
+    Stmt st(db_,
+            "SELECT id, ts, from_user, body FROM "
+            "(SELECT id, ts, from_user, body FROM room_history ORDER BY id DESC LIMIT ?) "
+            "ORDER BY id ASC;");
+    if (!st.ok()) return out;
+    st.Int64(1, limit);
+    while (st.Step() == SQLITE_ROW) {
+        RoomMessage msg;
+        msg.id = st.ColInt64(0);
+        msg.ts = st.ColInt64(1);
+        msg.fromUser = st.ColText(2);
+        if (!river::OpenPayload(st.ColText(3), msg.textB64) || msg.textB64.empty()) continue;
+        out.push_back(std::move(msg));
+    }
+    return out;
+}
+
+bool UserRepository::PruneExpiredOfflinePmsLocked() {
+    Stmt st(db_, "DELETE FROM offline_pm WHERE ts < ?;");
+    if (!st.ok()) return false;
+    st.Int64(1, static_cast<long long>(time(nullptr)) - kOfflinePmTtlSeconds);
+    return st.Step() == SQLITE_DONE;
+}
+
+OfflineQueueResult UserRepository::QueueOfflinePm(const std::string& toUser,
+                                                  const std::string& fromUser,
+                                                  long long ts,
+                                                  const std::string& envelopeB64) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr || toUser.empty() || fromUser.empty() || envelopeB64.empty())
+        return OfflineQueueResult::Error;
+    if (!ExecSQLLocked("BEGIN IMMEDIATE;")) return OfflineQueueResult::Error;
+    auto fail = [&](OfflineQueueResult r) {
+        ExecSQLLocked("ROLLBACK;");
+        return r;
+    };
+    if (!PruneExpiredOfflinePmsLocked()) return fail(OfflineQueueResult::Error);
+    {
+        Stmt st(db_, "SELECT COUNT(*) FROM offline_pm WHERE to_user=?;");
+        if (!st.ok()) return fail(OfflineQueueResult::Error);
+        st.Text(1, toUser);
+        if (st.Step() != SQLITE_ROW) return fail(OfflineQueueResult::Error);
+        if (st.ColInt64(0) >= kOfflinePmPerRecipient) return fail(OfflineQueueResult::Full);
+    }
+    {
+        Stmt st(db_, "INSERT INTO offline_pm (to_user, from_user, ts, envelope) VALUES (?, ?, ?, ?);");
+        if (!st.ok()) return fail(OfflineQueueResult::Error);
+        st.Text(1, toUser);
+        st.Text(2, fromUser);
+        st.Int64(3, ts);
+        st.Text(4, envelopeB64);
+        if (st.Step() != SQLITE_DONE) return fail(OfflineQueueResult::Error);
+    }
+    return ExecSQLLocked("COMMIT;") ? OfflineQueueResult::Queued : OfflineQueueResult::Error;
+}
+
+std::vector<OfflinePm> UserRepository::TakeOfflinePms(const std::string& toUser) {
+    std::vector<OfflinePm> out;
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr || toUser.empty()) return out;
+    if (!ExecSQLLocked("BEGIN IMMEDIATE;")) return out;
+    bool ok = PruneExpiredOfflinePmsLocked();
+    if (ok) {
+        Stmt st(db_, "SELECT id, from_user, ts, envelope FROM offline_pm WHERE to_user=? ORDER BY id ASC;");
+        ok = st.ok();
+        if (ok) {
+            st.Text(1, toUser);
+            int rc;
+            while ((rc = st.Step()) == SQLITE_ROW) {
+                OfflinePm pm;
+                pm.id = st.ColInt64(0);
+                pm.fromUser = st.ColText(1);
+                pm.ts = st.ColInt64(2);
+                pm.envelopeB64 = st.ColText(3);
+                out.push_back(std::move(pm));
+            }
+            ok = rc == SQLITE_DONE;
+        }
+    }
+    if (ok) {
+        Stmt st(db_, "DELETE FROM offline_pm WHERE to_user=?;");
+        ok = st.ok();
+        if (ok) {
+            st.Text(1, toUser);
+            ok = st.Step() == SQLITE_DONE;
+        }
+    }
+    if (!ok || !ExecSQLLocked("COMMIT;")) {
+        ExecSQLLocked("ROLLBACK;");
+        out.clear();
+    }
+    return out;
+}
+
+int UserRepository::CountOfflinePms(const std::string& toUser) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr) return 0;
+    Stmt st(db_, "SELECT COUNT(*) FROM offline_pm WHERE to_user=?;");
+    if (!st.ok()) return 0;
+    st.Text(1, toUser);
+    return st.Step() == SQLITE_ROW ? static_cast<int>(st.ColInt64(0)) : 0;
 }

@@ -187,3 +187,85 @@ S→to: PM2:<fromUser>:<unixTs>:<envelopeB64>
 - Client runtime log `client_runtime.log` is written only when
   `THE_RIVER_CLIENT_LOG=1`, and never contains message contents, credentials
   or raw unhandled lines.
+
+## Implementation notes (server)
+
+Choices made where the text above leaves room; clients can rely on them.
+
+- **v1 lines** (`[LOGIN_INIT]:`, `[LOGIN_PROOF]:`, and also the v1 first-login
+  `[CHANGE]:`) and an `[AUTH_START]` whose version field is not `2` get
+  `SYSTEM: CLIENTE OBSOLETO. Actualiza al protocolo 2.` and the server then
+  closes the connection.
+- **AUTH_START validation**: username must pass `IsValidUsername`, hwid is
+  1..128 chars without control chars, `:` or `|`, clientNonce exactly 32 hex
+  chars; otherwise `SYSTEM: CREDENCIALES INCORRECTAS.` (no challenge). The
+  server nonce part is 32 lowercase hex chars. Only one challenge is pending
+  per connection (a new `AUTH_START` replaces it) and it is single use: any
+  `AUTH_PROOF` consumes it, success or not. Lockouts (5 failures per user,
+  10 per origin = hwid, 5 min) are evaluated at `AUTH_PROOF` time, as in v1,
+  so a locked or unknown user still receives a challenge. `AUTH_START` /
+  `AUTH_PROOF` are ignored once the connection is authenticated or waiting
+  for `[CHANGE2]`.
+- **Fake challenge**: salt = first 16 bytes (32 hex) of
+  `HMAC-SHA256(per-process secret, "river-fake-salt|" + user)`, iter =
+  `scram::kDefaultIterations` (210000, same as every credential the server
+  creates or migrates). A stored value that is not a valid `scram-sha256$`
+  credential is treated like an unknown user.
+- `AUTH_OK` is sent only when the proof verifies **and** the account policy
+  admits the login (normal or first login). A correct proof from a banned or
+  wrong HWID gets only `SYSTEM: ACCESO BLOQUEADO.` / `SYSTEM: HWID NO RECONOCIDO.`
+- **Login sequence** (normal): `AUTH_OK`, `SYSTEM: ACCESO CONCEDIDO.`,
+  `SESSION:<id>`, `HISTORY_BEGIN:<n>` (always sent, also with `n = 0`), `n`×`HIST:`,
+  `HISTORY_END`, queued `PM2:` lines, then the room broadcast `<user> se unió`
+  and `[USERS]:...`. After `[CHANGE2]` the same sequence follows
+  `SYSTEM: ACTUALIZADO.` (no second `AUTH_OK`). Room `MSG:` and `PM2:` lines are
+  strictly ordered with respect to this block (none is lost or duplicated);
+  other broadcasts (`KEY_CHANGED`, `ATTACH2`, `[USERS]`, announcements) may
+  interleave anywhere, so clients must accept any line at any time.
+- **CHANGE2**: iter must be an unsigned decimal in
+  `[scram::kMinIterations (100000), scram::kMaxIterations]`; salt 16..64 bytes
+  hex; storedKey/serverKey exactly 64 hex chars (upper case accepted, stored
+  lower case). Refused for admins and when the new name is taken. The renamed
+  account starts with no public key and no queued PMs.
+- **KEY_SET**: the key must decode to exactly 32 bytes, else
+  `SYSTEM: CLAVE PUBLICA RECHAZADA.` `KEY_CHANGED:<user>` is broadcast to all
+  authenticated clients (sender included) whenever the stored value differs
+  from the previous one, *including the first publication* (so peers waiting
+  for a key learn it exists). Re-publishing the same key only answers
+  `SYSTEM: CLAVE PUBLICA REGISTRADA.`
+- **KEY_GET** for a name that is not a valid username answers `KEY:<name>:-`
+  (silently ignored if the name contains `:`, `|` or control chars).
+- **Base64**: every b64 field is decoded strictly and relayed/stored
+  re-encoded in canonical form.
+- **MSG**: invalid base64 or empty text → `SYSTEM: MENSAJE RECHAZADO.`;
+  > 8192 decoded bytes → `SYSTEM: MENSAJE DEMASIADO GRANDE.` Text starting
+  with `/` is never broadcast or stored: admin → admin command, others →
+  `SYSTEM: Comando no disponible. Usa /help para ver los comandos.` The sender
+  also receives its own `MSG:` broadcast. `room_history.body` stores
+  `SealPayload(textB64)`.
+- **PM2 / PMX**: envelope must decode to 64..16384 bytes, recipient must pass
+  `IsValidUsername`, else `SYSTEM: MENSAJE PRIVADO RECHAZADO.` Delivered as
+  `PM2:<from>:<ts>:<env>` / `PMX:<from>:<ts>:<env>`. Offline recipient:
+  PM2 → queued (`SYSTEM: Mensaje privado en cola para <user>.`), or, at 200
+  queued for that recipient, `SYSTEM: Cola de mensajes privados llena para <user>.`
+  (the new message is refused; older ones are kept). PMX →
+  `SYSTEM: Usuario '<user>' no conectado.` Unknown recipient (both) →
+  `SYSTEM: Usuario '<user>' no encontrado.` Queued PMs keep their original
+  `ts`, are delivered once (deleted when read at login, even if that
+  connection then drops) and expire after 7 days. `offline_pm.envelope` holds
+  the (already E2E encrypted) envelope b64 as is.
+- **ATTACH2**: id 1..80 chars, no `:`/`|`/control chars; kind
+  `image|video|file`; name non-empty ≤ 1024 bytes decoded; mime ≤ 255 bytes
+  decoded (may be empty); size decimal 1..12 MiB. Invalid →
+  `SYSTEM: ADJUNTO RECHAZADO.`; line > 16 KiB → `SYSTEM: ADJUNTO RECHAZADO POR TAMANO.`
+  Broadcast to everyone, sender included.
+- **Chunks**: envelope part must be 64..(64 KiB + 64) bytes, else
+  `SYSTEM: ADJUNTO RECHAZADO.` Framing is unchanged.
+- **Rate limits**: `MSG`, `PM2`, `PMX` share the 60/min message budget (admin
+  commands sent as `MSG` count too); `ATTACH2` 12/min; chunks 1200/min; all
+  text lines 120/min.
+- **Migration** (`PRAGMA user_version` 1 → 2): every `pbkdf2-sha256$...` row is
+  converted in the `InitSchema` transaction. A row that cannot be parsed is
+  left untouched (logged; that account needs `/passwd`) instead of aborting
+  startup. The credential column keeps its v1 name `password_hash`.
+- `/whois <user>` appends `| huella=<fingerprint>` (or `huella=-`).

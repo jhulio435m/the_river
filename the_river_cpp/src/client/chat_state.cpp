@@ -5,23 +5,10 @@
 #include <sstream>
 
 #include "client/attachment_utils.h"
-#include "common/secure_envelope.h"
-#include "common/shared_config.h"
-#include "common/security_utils.h"
 
 namespace {
 
 constexpr std::size_t kMaxChatLogEntries = 1000;
-
-bool LooksLikeUsername(const std::string& value) {
-    if (value.size() < 3 || value.size() > 24) return false;
-    for (unsigned char c : value) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '_' || c == '-';
-        if (!ok) return false;
-    }
-    return true;
-}
 
 }  // namespace
 
@@ -121,8 +108,17 @@ void ChatState::MarkNewMessage() {
 }
 
 std::string ChatState::GetTimestamp() const {
-    time_t now = time(nullptr);
-    struct tm t = *localtime(&now);
+    return FormatTimestamp(0);
+}
+
+std::string ChatState::FormatTimestamp(long long unixTs) {
+    time_t value = unixTs > 0 ? static_cast<time_t>(unixTs) : time(nullptr);
+    struct tm t {};
+#ifdef _WIN32
+    localtime_s(&t, &value);
+#else
+    localtime_r(&value, &t);
+#endif
     char buf[20];
     strftime(buf, sizeof(buf), "%H:%M", &t);
     return buf;
@@ -133,7 +129,7 @@ void ChatState::PushLogLocked(const LogEntry& entry) {
     if (chatLogs_.size() > kMaxChatLogEntries) chatLogs_.pop_front();
 }
 
-void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::string& currentUser, bool isPm) {
+void ChatState::AddIncomingWireMessage(const std::string& rawMsg) {
     std::string msg = rawMsg;
     msg.erase(std::remove(msg.begin(), msg.end(), '\r'), msg.end());
     msg.erase(std::remove(msg.begin(), msg.end(), '\n'), msg.end());
@@ -153,29 +149,44 @@ void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::str
     }
 
     std::lock_guard<std::mutex> chatLock(chatMutex_);
-    const std::string timestamp = GetTimestamp();
+    PushLogLocked({GetTimestamp(), "SYSTEM", msg, true, false});
+}
 
-    const std::size_t sep = msg.find(':');
-    const bool isSystemLine = msg.rfind("SYSTEM", 0) == 0;
-    if (!isSystemLine && sep != std::string::npos && LooksLikeUsername(msg.substr(0, sep))) {
-        std::string user = msg.substr(0, sep);
-        std::string payload = msg.substr(sep + 1);
-
-        std::string dec;
-        if (!river::OpenPayload(payload, dec)) dec = "[AUTH_ERR]";
-        if (isPm) {
-            dec = "[PM] " + dec;
-            if (user != currentUser) {
-                std::lock_guard<std::mutex> lock(uiStateMutex_);
-                lastPrivatePeer_ = user;
+bool ChatState::AddRoomMessage(const std::string& user,
+                               const std::string& text,
+                               long long unixTs,
+                               bool fromHistory,
+                               const std::string& currentUser) {
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    if (fromHistory && unixTs > 0) {
+        for (const auto& entry : chatLogs_) {
+            if (!entry.isSystem && !entry.isAttachment && !entry.isPM &&
+                entry.unixTs == unixTs && entry.user == user && entry.text == text) {
+                return false;
             }
         }
-
-        PushLogLocked({timestamp, user, dec, false, isPm});
-        if (user != currentUser) MarkNewMessage();
-    } else {
-        PushLogLocked({timestamp, "SYSTEM", msg, true, false});
     }
+    LogEntry entry{FormatTimestamp(unixTs), user, text, false, false};
+    entry.unixTs = unixTs;
+    entry.isHistory = fromHistory;
+    PushLogLocked(entry);
+    if (!fromHistory && user != currentUser) MarkNewMessage();
+    return true;
+}
+
+void ChatState::AddIncomingPrivateMessage(const std::string& user,
+                                          const std::string& text,
+                                          long long unixTs,
+                                          const std::string& currentUser) {
+    {
+        std::lock_guard<std::mutex> lock(uiStateMutex_);
+        if (user != currentUser) lastPrivatePeer_ = user;
+    }
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    LogEntry entry{FormatTimestamp(unixTs), user, "[PM] " + text, false, true};
+    entry.unixTs = unixTs;
+    PushLogLocked(entry);
+    if (user != currentUser) MarkNewMessage();
 }
 
 void ChatState::AddSystemLog(const std::string& message) {

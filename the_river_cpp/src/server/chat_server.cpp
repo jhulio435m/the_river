@@ -20,6 +20,8 @@
 #endif
 
 #include "common/base64.h"
+#include "common/e2e_crypto.h"
+#include "common/scram.h"
 #include "common/secure_envelope.h"
 #include "common/security_utils.h"
 #include "common/shared_config.h"
@@ -29,6 +31,17 @@ namespace {
 constexpr std::size_t kMaxLineBytes = 65536;
 constexpr std::size_t kMaxChatPayloadBytes = 8192;
 constexpr std::size_t kMaxAttachmentControlBytes = 16384;
+// PROTOCOL_V2.md 4.2/4.3: PM2/PMX envelopes (decoded) and chunk envelopes.
+constexpr std::size_t kMaxPrivateEnvelopeBytes = 16u * 1024u;
+constexpr std::size_t kMaxChunkEnvelopeBytes = 64u * 1024u + river::e2e::kEnvelopeOverhead;
+constexpr std::size_t kMaxAttachmentBytes = 12u * 1024u * 1024u;
+constexpr std::size_t kMaxAttachmentIdChars = 80;
+constexpr std::size_t kMaxAttachmentNameBytes = 1024;
+constexpr std::size_t kMaxAttachmentMimeBytes = 255;
+constexpr std::size_t kMaxHwidChars = 128;
+constexpr std::size_t kClientNonceHexChars = 32;
+constexpr std::size_t kServerNonceBytes = 16;  // 32 hex chars appended to the client nonce
+constexpr const char* kObsoleteClientNotice = "SYSTEM: CLIENTE OBSOLETO. Actualiza al protocolo 2.";
 constexpr int kLoginChallengeTtlSeconds = 60;
 constexpr int kMaxLinesPerMinute = 120;
 constexpr int kMaxMessagesPerMinute = 60;
@@ -148,14 +161,53 @@ std::vector<std::string> SplitWhitespace(const std::string& input) {
     return parts;
 }
 
-std::string ChallengeSpecFromPasswordHash(const std::string& storedHash) {
-    if (storedHash.rfind("pbkdf2-sha256$", 0) != 0) return "";
-    std::vector<std::string> parts;
-    std::stringstream ss(storedHash);
-    std::string part;
-    while (std::getline(ss, part, '$')) parts.push_back(part);
-    if (parts.size() != 4) return "";
-    return parts[0] + "$" + parts[1] + "$" + parts[2];
+// Splits on ':' keeping empty fields ("a::b" -> {"a", "", "b"}).
+std::vector<std::string> SplitFields(const std::string& input) {
+    std::vector<std::string> fields;
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t sep = input.find(':', start);
+        if (sep == std::string::npos) {
+            fields.push_back(input.substr(start));
+            return fields;
+        }
+        fields.push_back(input.substr(start, sep - start));
+        start = sep + 1;
+    }
+}
+
+// Decimal digits only, no sign / whitespace, value <= maxValue.
+bool ParseStrictUnsigned(const std::string& text, unsigned long long maxValue, unsigned long long& out) {
+    if (text.empty() || text.size() > 19) return false;
+    unsigned long long value = 0;
+    for (char c : text) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<unsigned long long>(c - '0');
+    }
+    if (value > maxValue) return false;
+    out = value;
+    return true;
+}
+
+// Strict base64 decode; `canonical` receives the re-encoded form so the
+// server only ever relays canonical base64.
+bool DecodeB64Field(const std::string& b64, std::string& decoded, std::string& canonical) {
+    if (!river::base64::DecodeToString(b64, decoded)) return false;
+    canonical = river::base64::EncodeString(decoded);
+    return true;
+}
+
+bool HasControlOrSeparator(const std::string& value) {
+    for (unsigned char c : value) {
+        if (c < 0x20 || c == 0x7f || c == ':' || c == '|') return true;
+    }
+    return false;
+}
+
+std::string ToLowerAscii(std::string value) {
+    for (char& c : value)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return value;
 }
 
 std::string JsonEscape(const std::string& value) {
@@ -228,7 +280,16 @@ void AppendSizedString(std::string& out, const std::string& value) {
 }
 
 ChatServer::ChatServer(const std::string& dbPath, const std::string& logPath)
-    : dbPath_(dbPath), logPath_(logPath) {}
+    : dbPath_(dbPath), logPath_(logPath) {
+    fakeSaltSecret_ = river::scram::RandomNonceHex(32);
+    if (fakeSaltSecret_.empty()) fakeSaltSecret_ = RandomHex(32);
+}
+
+std::string ChatServer::FakeSaltHex(const std::string& username) const {
+    // 16 bytes, like a real salt; stable for the process lifetime so repeated
+    // AUTH_START for the same unknown name does not reveal it is fake.
+    return ToLowerAscii(HmacSha256Hex(fakeSaltSecret_, "river-fake-salt|" + username)).substr(0, 32);
+}
 
 void ChatServer::RequestStop() {
     g_stopRequested.store(true);
@@ -492,17 +553,6 @@ bool ChatServer::SendDirectLineToUser(const std::string& toNick, const std::stri
     return false;
 }
 
-bool ChatServer::SendPrivateMessage(const std::string& toNick, const std::string& fromNick, const std::string& encPayload) {
-    std::lock_guard<std::mutex> lk(clientsMutex_);
-    for (auto& [sock, cl] : clients_) {
-        if (cl.auth && cl.nick == toNick) {
-            SendLine(sock, "[PM]:" + fromNick + ":" + encPayload);
-            return true;
-        }
-    }
-    return false;
-}
-
 bool ChatServer::RelayAttachmentChunk(const std::string& fromNick, const std::string& payload) {
     std::size_t offset = 0;
     std::string target;
@@ -523,7 +573,8 @@ bool ChatServer::RelayAttachmentChunk(const std::string& fromNick, const std::st
     }
 
     const std::string encryptedChunk = payload.substr(offset);
-    if (encryptedChunk.size() > 64 * 1024) return false;
+    if (encryptedChunk.size() < river::e2e::kEnvelopeOverhead ||
+        encryptedChunk.size() > kMaxChunkEnvelopeBytes) return false;
 
     std::string outbound;
     AppendSizedString(outbound, fromNick);
@@ -613,54 +664,12 @@ std::string ChatServer::BuildUsersSnapshot() {
     return first ? "sin usuarios conectados" : ss.str();
 }
 
-ChatServer::LoginResult ChatServer::AuthorizeLogin(const std::string& username,
-                                                   const std::string& password,
-                                                   const std::string& hwid) {
-    {
-        std::lock_guard<std::mutex> lk(attemptsMutex_);
-        auto it = loginLocks_.find(username);
-        if (it != loginLocks_.end() && it->second > time(nullptr))
-            return {LoginCode::Blocked, false};
-    }
-
-    UserRecord record = repo_.FindUserByCredentials(username, password);
-    LoginResult result;
-    result.isAdmin = record.isAdmin;
-
-    if (!record.found) {
-        result.code = LoginCode::InvalidCredentials;
-    } else if (!record.isAdmin && repo_.IsHwidBanned(hwid)) {
-        result.code = LoginCode::Blocked;
-    } else if (!record.isAdmin && !record.hwid.empty() && record.hwid != hwid) {
-        result.code = LoginCode::HwidMismatch;
-    } else {
-        if (!record.isAdmin && record.hwid.empty()) repo_.UpdateUserHwid(username, hwid);
-        result.code = record.firstLogin ? LoginCode::FirstLogin : LoginCode::Ok;
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(attemptsMutex_);
-        if (result.code == LoginCode::Ok || result.code == LoginCode::FirstLogin) {
-            loginFailures_.erase(username);
-            loginLocks_.erase(username);
-        } else if (result.code == LoginCode::InvalidCredentials) {
-            int& failures = loginFailures_[username];
-            failures++;
-            if (failures >= 5) {
-                loginLocks_[username] = time(nullptr) + 300;
-                failures = 0;
-            LogRuntime("SEC", "Usuario '" + username + "' bloqueado por 5 min.");
-            }
-        }
-    }
-
-    return result;
-}
-
 ChatServer::LoginResult ChatServer::AuthorizeLoginProof(const std::string& username,
-                                                        const std::string& proof,
-                                                        const std::string& nonce,
-                                                        const std::string& hwid) {
+                                                        const std::string& hwid,
+                                                        const std::string& authMessage,
+                                                        const std::string& clientProofRaw,
+                                                        std::string& serverSignatureRaw) {
+    serverSignatureRaw.clear();
     {
         std::lock_guard<std::mutex> lk(attemptsMutex_);
         const time_t now = time(nullptr);
@@ -672,30 +681,40 @@ ChatServer::LoginResult ChatServer::AuthorizeLoginProof(const std::string& usern
             return {LoginCode::Blocked, false};
     }
 
-    std::string storedHash;
     LoginResult result;
-    if (!repo_.GetPasswordHash(username, storedHash)) {
-        result.code = LoginCode::InvalidCredentials;
-    } else if (storedHash.rfind("pbkdf2-sha256$", 0) != 0) {
+    river::scram::Credential credential;
+    bool proofOk = false;
+    if (repo_.GetCredential(username, credential)) {
+        proofOk = !authMessage.empty() &&
+                  river::scram::VerifyClientProof(credential, authMessage, clientProofRaw);
+    } else {
+        // Unknown user (or unusable stored value): do the same verification
+        // work against a credential nobody can satisfy, then fail.
+        river::scram::Credential dummy;
+        if (river::scram::CredentialFromParts(river::scram::kDefaultIterations, FakeSaltHex(username),
+                                              std::string(64, '0'), std::string(64, '0'), dummy)) {
+            river::scram::VerifyClientProof(dummy, authMessage, clientProofRaw);
+        }
+    }
+    if (proofOk) serverSignatureRaw = river::scram::ServerSignature(credential, authMessage);
+
+    if (!proofOk || serverSignatureRaw.size() != river::scram::kKeyBytes) {
+        serverSignatureRaw.clear();
         result.code = LoginCode::InvalidCredentials;
     } else {
-        const std::string expected = HmacSha256Hex(storedHash, nonce + "|" + username + "|" + hwid);
-        if (!ConstantTimeEquals(expected, proof)) {
+        UserRecord record = repo_.FindUserByUsername(username);
+        result.isAdmin = record.isAdmin;
+        if (!record.found) {
             result.code = LoginCode::InvalidCredentials;
+        } else if (!record.isAdmin && repo_.IsHwidBanned(hwid)) {
+            result.code = LoginCode::Blocked;
+        } else if (!record.isAdmin && !record.hwid.empty() && record.hwid != hwid) {
+            result.code = LoginCode::HwidMismatch;
         } else {
-            UserRecord record = repo_.FindUserByUsername(username);
-            result.isAdmin = record.isAdmin;
-            if (!record.found) {
-                result.code = LoginCode::InvalidCredentials;
-            } else if (!record.isAdmin && repo_.IsHwidBanned(hwid)) {
-                result.code = LoginCode::Blocked;
-            } else if (!record.isAdmin && !record.hwid.empty() && record.hwid != hwid) {
-                result.code = LoginCode::HwidMismatch;
-            } else {
-                if (!record.isAdmin && record.hwid.empty()) repo_.UpdateUserHwid(username, hwid);
-                result.code = record.firstLogin ? LoginCode::FirstLogin : LoginCode::Ok;
-            }
+            if (!record.isAdmin && record.hwid.empty()) repo_.UpdateUserHwid(username, hwid);
+            result.code = record.firstLogin ? LoginCode::FirstLogin : LoginCode::Ok;
         }
+        if (result.code != LoginCode::Ok && result.code != LoginCode::FirstLogin) serverSignatureRaw.clear();
     }
 
     {
@@ -713,7 +732,7 @@ ChatServer::LoginResult ChatServer::AuthorizeLoginProof(const std::string& usern
             if (userFailures >= 5) {
                 loginLocks_[username] = time(nullptr) + 300;
                 userFailures = 0;
-            LogRuntime("SEC", "Usuario '" + username + "' bloqueado por 5 min.");
+                LogRuntime("SEC", "Usuario '" + username + "' bloqueado por 5 min.");
             }
             if (originFailures >= 10) {
                 loginLocksByOrigin_[hwid] = time(nullptr) + 300;
@@ -724,6 +743,66 @@ ChatServer::LoginResult ChatServer::AuthorizeLoginProof(const std::string& usern
     }
 
     return result;
+}
+
+void ChatServer::CompleteLogin(SocketHandle clientSocket, const ClientSession& session, bool afterChange) {
+    {
+        // Held across registration, history replay and the offline drain so
+        // no MSG/PM2 is missed or delivered twice (see chat_server.h).
+        std::lock_guard<std::mutex> delivery(deliveryMutex_);
+        if (afterChange) SendLine(clientSocket, "SYSTEM: ACTUALIZADO.");
+        SendLine(clientSocket, "SYSTEM: ACCESO CONCEDIDO.");
+        SendLine(clientSocket, "SESSION:" + session.sessionId);
+        RegisterAuthenticatedSession(session);
+
+        const std::vector<RoomMessage> history = repo_.RecentRoomMessages(UserRepository::kRoomHistoryReplay);
+        SendLine(clientSocket, "HISTORY_BEGIN:" + std::to_string(history.size()));
+        for (const auto& msg : history) {
+            SendLine(clientSocket, "HIST:" + msg.fromUser + ":" + std::to_string(msg.ts) + ":" + msg.textB64);
+        }
+        SendLine(clientSocket, "HISTORY_END");
+
+        const std::vector<OfflinePm> pending = repo_.TakeOfflinePms(session.nick);
+        for (const auto& pm : pending) {
+            SendLine(clientSocket, "PM2:" + pm.fromUser + ":" + std::to_string(pm.ts) + ":" + pm.envelopeB64);
+        }
+        if (!pending.empty())
+            LogRuntime("PM", std::to_string(pending.size()) + " mensajes privados en cola entregados a '" +
+                                 session.nick + "'.");
+    }
+    Broadcast(session.nick + " se unió");
+    BroadcastUsers();
+}
+
+void ChatServer::RoutePrivateEnvelope(SocketHandle senderSocket,
+                                      const std::string& fromNick,
+                                      const std::string& toNick,
+                                      const std::string& envelopeB64,
+                                      bool queueIfOffline) {
+    const long long ts = static_cast<long long>(time(nullptr));
+    const std::string line = std::string(queueIfOffline ? "PM2:" : "PMX:") + fromNick + ":" +
+                             std::to_string(ts) + ":" + envelopeB64;
+    std::lock_guard<std::mutex> delivery(deliveryMutex_);
+    if (SendDirectLineToUser(toNick, line)) return;
+    if (!repo_.UserExists(toNick)) {
+        SendLine(senderSocket, "SYSTEM: Usuario '" + toNick + "' no encontrado.");
+        return;
+    }
+    if (!queueIfOffline) {
+        SendLine(senderSocket, "SYSTEM: Usuario '" + toNick + "' no conectado.");
+        return;
+    }
+    switch (repo_.QueueOfflinePm(toNick, fromNick, ts, envelopeB64)) {
+        case OfflineQueueResult::Queued:
+            SendLine(senderSocket, "SYSTEM: Mensaje privado en cola para " + toNick + ".");
+            break;
+        case OfflineQueueResult::Full:
+            SendLine(senderSocket, "SYSTEM: Cola de mensajes privados llena para " + toNick + ".");
+            break;
+        case OfflineQueueResult::Error:
+            SendLine(senderSocket, "SYSTEM: MENSAJE PRIVADO RECHAZADO.");
+            break;
+    }
 }
 
 void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
@@ -747,6 +826,15 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
             SendLine(clientSocket, "SYSTEM: Uso: /whois <user>");
             return;
         }
+        std::string fingerprint = "-";
+        {
+            std::string keyB64;
+            std::string keyRaw;
+            if (repo_.GetUserKey(parts[1], keyB64) && river::base64::DecodeToString(keyB64, keyRaw)) {
+                const std::string fp = river::e2e::Fingerprint(keyRaw);
+                if (!fp.empty()) fingerprint = fp;
+            }
+        }
         ClientSession target;
         if (DescribeUser(parts[1], target)) {
             const time_t now = time(nullptr);
@@ -755,7 +843,8 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
                          " | conectado | admin=" + (target.isAdmin ? "si" : "no") +
                          " | hwid=" + (target.hwid.empty() ? "-" : target.hwid) +
                          " | sesion=" + FormatDuration(now - target.connectedAt) +
-                         " | ultima actividad hace " + FormatDuration(now - target.lastSeen));
+                         " | ultima actividad hace " + FormatDuration(now - target.lastSeen) +
+                         " | huella=" + fingerprint);
             return;
         }
         UserRecord record = repo_.FindUserByUsername(parts[1]);
@@ -767,7 +856,8 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
                  "SYSTEM: WHOIS " + parts[1] +
                      " | desconectado | admin=" + (record.isAdmin ? "si" : "no") +
                      " | primer_acceso=" + (record.firstLogin ? "pendiente" : "completado") +
-                     " | hwid=" + (record.hwid.empty() ? "-" : record.hwid));
+                     " | hwid=" + (record.hwid.empty() ? "-" : record.hwid) +
+                     " | huella=" + fingerprint);
         return;
     }
 
@@ -1010,9 +1100,13 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
     bool isAdmin = false;
     bool firstLoginPending = false;
     std::string sessionId;
+    // Outstanding AUTH_CHALLENGE2 (one per connection; a new AUTH_START replaces it).
     std::string pendingLoginUser;
     std::string pendingLoginHwid;
-    std::string pendingLoginNonce;
+    std::string pendingClientNonce;
+    std::string pendingCombinedNonce;
+    std::string pendingSaltHex;
+    int pendingIterations = 0;
     time_t pendingLoginIssuedAt = 0;
     time_t rateWindowStart = time(nullptr);
     int linesInWindow = 0;
@@ -1034,7 +1128,7 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
 
     // RegisterSocket was already called by Run() so a shutdown racing with
     // accept() still reaches this connection.
-    SendLine(clientSocket, "SYSTEM: UPLINK ESTABLISHED.");
+    SendLine(clientSocket, "SYSTEM: UPLINK ESTABLISHED. PROTO=2");
 
     while (true) {
         std::uint16_t frameType = 0;
@@ -1072,81 +1166,100 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 continue;
             }
 
-            if (StartsWith(raw, "[LOGIN_INIT]:")) {
-                std::stringstream ss(raw.substr(13));
-                std::string user;
-                std::string hwid;
-                std::getline(ss, user, ':');
-                std::getline(ss, hwid, ':');
-                if (!IsValidUsername(user) || hwid.empty() || hwid.size() > 128) {
+            if (StartsWith(raw, "[LOGIN_INIT]:") || StartsWith(raw, "[LOGIN_PROOF]:") ||
+                StartsWith(raw, "[CHANGE]:")) {
+                // v1 handshake (pass-the-hash): no compatibility mode.
+                SendLineThenClose(clientSocket, kObsoleteClientNotice);
+                continue;
+            }
+
+            if (StartsWith(raw, "[AUTH_START]:")) {
+                if (authed || firstLoginPending) continue;
+                const std::vector<std::string> f = SplitFields(raw.substr(13));
+                pendingCombinedNonce.clear();
+                if (f.size() != 4 || f[0] != "2") {
+                    SendLineThenClose(clientSocket, kObsoleteClientNotice);
+                    continue;
+                }
+                const std::string& user = f[1];
+                const std::string& hwid = f[2];
+                const std::string& clientNonce = f[3];
+                if (!IsValidUsername(user) || hwid.empty() || hwid.size() > kMaxHwidChars ||
+                    HasControlOrSeparator(hwid) ||
+                    !river::scram::IsHexString(clientNonce, kClientNonceHexChars)) {
                     SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
                     continue;
                 }
-                std::string storedHash;
-                if (!repo_.GetPasswordHash(user, storedHash)) {
-                    SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
-                    continue;
+                river::scram::Credential credential;
+                if (repo_.GetCredential(user, credential)) {
+                    pendingSaltHex = credential.saltHex;
+                    pendingIterations = credential.iterations;
+                } else {
+                    // Unknown user: deterministic fake salt, fixed iterations.
+                    pendingSaltHex = FakeSaltHex(user);
+                    pendingIterations = river::scram::kDefaultIterations;
                 }
-                const std::string challengeSpec = ChallengeSpecFromPasswordHash(storedHash);
-                if (challengeSpec.empty()) {
+                const std::string serverNonce = river::scram::RandomNonceHex(kServerNonceBytes);
+                if (serverNonce.empty()) {
                     SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
                     continue;
                 }
                 pendingLoginUser = user;
                 pendingLoginHwid = hwid;
-                pendingLoginNonce = RandomHex(16);
+                pendingClientNonce = clientNonce;
+                pendingCombinedNonce = clientNonce + serverNonce;
                 pendingLoginIssuedAt = time(nullptr);
-                SendLine(clientSocket, "AUTH_CHALLENGE:" + pendingLoginNonce + ":" + challengeSpec);
-            } else if (StartsWith(raw, "[LOGIN_PROOF]:")) {
-                std::stringstream ss(raw.substr(14));
-                std::string user;
-                std::string hwid;
-                std::string proof;
-                std::getline(ss, user, ':');
-                std::getline(ss, hwid, ':');
-                std::getline(ss, proof, ':');
-                if (user != pendingLoginUser ||
-                    hwid != pendingLoginHwid ||
-                    pendingLoginNonce.empty() ||
-                    proof.size() != 64 ||
-                    time(nullptr) - pendingLoginIssuedAt > kLoginChallengeTtlSeconds) {
-                    pendingLoginNonce.clear();
+                SendLine(clientSocket, "AUTH_CHALLENGE2:" + pendingCombinedNonce + ":" + pendingSaltHex + ":" +
+                                           std::to_string(pendingIterations));
+            } else if (StartsWith(raw, "[AUTH_PROOF]:")) {
+                if (authed || firstLoginPending) continue;
+                const std::vector<std::string> f = SplitFields(raw.substr(13));
+                std::string proofRaw;
+                const bool shapeOk = f.size() == 4 && !pendingCombinedNonce.empty() &&
+                                     f[0] == pendingLoginUser && f[1] == pendingLoginHwid &&
+                                     f[2] == pendingCombinedNonce &&
+                                     time(nullptr) - pendingLoginIssuedAt <= kLoginChallengeTtlSeconds &&
+                                     river::base64::DecodeToString(f[3], proofRaw) &&
+                                     proofRaw.size() == river::scram::kKeyBytes;
+                const std::string user = pendingLoginUser;
+                const std::string hwid = pendingLoginHwid;
+                const std::string authMessage =
+                    shapeOk ? river::scram::BuildAuthMessage(user, hwid, pendingClientNonce, pendingCombinedNonce,
+                                                             pendingSaltHex, pendingIterations)
+                            : std::string();
+                pendingCombinedNonce.clear();  // single use
+                if (!shapeOk || authMessage.empty()) {
                     SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
                     continue;
                 }
 
-                currentHwid = hwid;
-                LoginResult login = AuthorizeLoginProof(user, proof, pendingLoginNonce, hwid);
-                pendingLoginNonce.clear();
-                isAdmin = login.isAdmin;
+                std::string serverSignature;
+                LoginResult login = AuthorizeLoginProof(user, hwid, authMessage, proofRaw, serverSignature);
+                if (login.code == LoginCode::Ok || login.code == LoginCode::FirstLogin) {
+                    SendLine(clientSocket, "AUTH_OK:" + river::base64::EncodeString(serverSignature));
+                    currentHwid = hwid;
+                    currentNick = user;
+                    isAdmin = login.isAdmin;
+                    sessionId = RandomHex(16);
+                }
 
                 if (login.code == LoginCode::FirstLogin) {
                     SendLine(clientSocket, "SYSTEM: FIRST LOGIN. CHANGE REQUIRED.");
-                    currentNick = user;
-                    sessionId = RandomHex(16);
                     firstLoginPending = true;
                 } else if (login.code == LoginCode::Ok) {
-                    SendLine(clientSocket, "SYSTEM: ACCESO CONCEDIDO.");
-                    currentNick = user;
-                    sessionId = RandomHex(16);
-                    SendLine(clientSocket, "SESSION:" + sessionId);
                     authed = true;
                     firstLoginPending = false;
-                    {
-                        const time_t now = time(nullptr);
-                        ClientSession session;
-                        session.socket = clientSocket;
-                        session.nick = user;
-                        session.hwid = hwid;
-                        session.sessionId = sessionId;
-                        session.auth = true;
-                        session.isAdmin = isAdmin;
-                        session.lastSeen = now;
-                        session.connectedAt = now;
-                        RegisterAuthenticatedSession(session);
-                    }
-                    Broadcast(user + " se unió");
-                    BroadcastUsers();
+                    const time_t now = time(nullptr);
+                    ClientSession session;
+                    session.socket = clientSocket;
+                    session.nick = user;
+                    session.hwid = hwid;
+                    session.sessionId = sessionId;
+                    session.auth = true;
+                    session.isAdmin = isAdmin;
+                    session.lastSeen = now;
+                    session.connectedAt = now;
+                    CompleteLogin(clientSocket, session, false);
                 } else if (login.code == LoginCode::Blocked) {
                     SendLine(clientSocket, "SYSTEM: ACCESO BLOQUEADO.");
                 } else if (login.code == LoginCode::HwidMismatch) {
@@ -1154,43 +1267,124 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                 } else {
                     SendLine(clientSocket, "SYSTEM: CREDENCIALES INCORRECTAS.");
                 }
-            } else if (StartsWith(raw, "[CHANGE]:") && firstLoginPending && !currentNick.empty()) {
-                std::stringstream ss(raw.substr(9));
-                std::string newUser;
-                std::string newPass;
-                std::getline(ss, newUser, ':');
-                std::getline(ss, newPass, ':');
-                std::string decryptedPass;
-                if (river::OpenPayload(newPass, decryptedPass)) newPass = decryptedPass;
-                if (!IsValidUsername(newUser) || !IsStrongEnoughPassword(newPass)) {
+            } else if (StartsWith(raw, "[CHANGE2]:") && firstLoginPending && !currentNick.empty()) {
+                const std::vector<std::string> f = SplitFields(raw.substr(10));
+                unsigned long long iterations = 0;
+                const bool valid = f.size() == 5 && IsValidUsername(f[0]) &&
+                                   ParseStrictUnsigned(f[2], static_cast<unsigned long long>(river::scram::kMaxIterations),
+                                                       iterations) &&
+                                   iterations >= static_cast<unsigned long long>(river::scram::kMinIterations) &&
+                                   river::scram::IsValidSaltHex(f[1]) &&
+                                   river::scram::IsHexString(f[3], 2 * river::scram::kKeyBytes) &&
+                                   river::scram::IsHexString(f[4], 2 * river::scram::kKeyBytes);
+                if (!valid || !repo_.CompleteFirstLoginWithCredential(currentNick, f[0], static_cast<int>(iterations),
+                                                                      f[1], f[3], f[4])) {
                     SendLine(clientSocket, "SYSTEM: ERROR ACTUALIZANDO USUARIO.");
-                } else if (repo_.CompleteFirstLogin(currentNick, newUser, newPass)) {
-                    currentNick = newUser;
-                    sessionId = RandomHex(16);
-                    authed = true;
-                    firstLoginPending = false;
-                    {
-                        const time_t now = time(nullptr);
-                        ClientSession session;
-                        session.socket = clientSocket;
-                        session.nick = newUser;
-                        session.hwid = currentHwid;
-                        session.sessionId = sessionId;
-                        session.auth = true;
-                        session.isAdmin = false;
-                        session.lastSeen = now;
-                        session.connectedAt = now;
-                        RegisterAuthenticatedSession(session);
-                    }
-                    SendLine(clientSocket, "SYSTEM: ACTUALIZADO.");
-                    SendLine(clientSocket, "SYSTEM: ACCESO CONCEDIDO.");
-                    SendLine(clientSocket, "SESSION:" + sessionId);
-                    Broadcast(newUser + " se unió");
-                    BroadcastUsers();
-                } else {
-                    SendLine(clientSocket, "SYSTEM: ERROR ACTUALIZANDO USUARIO.");
+                    continue;
                 }
-            } else if (StartsWith(raw, "[ATTACH]:") && authed) {
+                const std::string newUser = f[0];
+                LogRuntime("SEC", "Primer acceso completado: '" + currentNick + "' -> '" + newUser + "'.");
+                currentNick = newUser;
+                sessionId = RandomHex(16);
+                authed = true;
+                firstLoginPending = false;
+                const time_t now = time(nullptr);
+                ClientSession session;
+                session.socket = clientSocket;
+                session.nick = newUser;
+                session.hwid = currentHwid;
+                session.sessionId = sessionId;
+                session.auth = true;
+                session.isAdmin = false;
+                session.lastSeen = now;
+                session.connectedAt = now;
+                CompleteLogin(clientSocket, session, true);
+            } else if (!authed) {
+                continue;  // everything below requires an authenticated session
+            } else if (StartsWith(raw, "[KEY_SET]:")) {
+                std::string keyRaw;
+                std::string keyB64;
+                if (!DecodeB64Field(raw.substr(10), keyRaw, keyB64) || keyRaw.size() != river::e2e::kKeyBytes) {
+                    SendLine(clientSocket, "SYSTEM: CLAVE PUBLICA RECHAZADA.");
+                    continue;
+                }
+                const KeySetResult result = repo_.SetUserKey(currentNick, keyB64);
+                if (result == KeySetResult::Error) {
+                    SendLine(clientSocket, "SYSTEM: CLAVE PUBLICA RECHAZADA.");
+                    continue;
+                }
+                SendLine(clientSocket, "SYSTEM: CLAVE PUBLICA REGISTRADA.");
+                if (result == KeySetResult::Changed) {
+                    LogRuntime("KEY", "Clave publica de '" + currentNick + "' actualizada (" +
+                                          river::e2e::Fingerprint(keyRaw) + ").");
+                    Broadcast("KEY_CHANGED:" + currentNick);
+                }
+            } else if (StartsWith(raw, "[KEY_GET]:")) {
+                const std::string user = raw.substr(10);
+                if (user.empty() || user.size() > 64 || HasControlOrSeparator(user)) continue;
+                std::string keyB64;
+                if (IsValidUsername(user) && repo_.GetUserKey(user, keyB64))
+                    SendLine(clientSocket, "KEY:" + user + ":" + keyB64);
+                else
+                    SendLine(clientSocket, "KEY:" + user + ":-");
+            } else if (StartsWith(raw, "[MSG]:")) {
+                if (++messagesInWindow > kMaxMessagesPerMinute) {
+                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
+                    continue;
+                }
+                std::string text;
+                std::string textB64;
+                if (!DecodeB64Field(raw.substr(6), text, textB64) || text.empty()) {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE RECHAZADO.");
+                    continue;
+                }
+                if (text.size() > kMaxChatPayloadBytes) {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE DEMASIADO GRANDE.");
+                    continue;
+                }
+                if (StartsWith(text, "/")) {
+                    if (isAdmin) {
+                        ClientSession currentClient;
+                        {
+                            std::lock_guard<std::mutex> lk(clientsMutex_);
+                            currentClient = clients_[clientSocket];
+                        }
+                        HandleAdminCommand(clientSocket, currentClient, text);
+                    } else {
+                        // Never broadcast mistyped commands from regular users to the room.
+                        SendLine(clientSocket, "SYSTEM: Comando no disponible. Usa /help para ver los comandos.");
+                    }
+                    continue;
+                }
+                LogEncryptedMessage(currentNick, textB64);
+                {
+                    std::lock_guard<std::mutex> delivery(deliveryMutex_);
+                    const long long ts = static_cast<long long>(time(nullptr));
+                    if (!repo_.AppendRoomMessage(currentNick, ts, textB64))
+                        LogRuntime("DB", "No se pudo guardar un mensaje en room_history.");
+                    Broadcast("MSG:" + currentNick + ":" + std::to_string(ts) + ":" + textB64);
+                }
+            } else if (StartsWith(raw, "[PM2]:") || StartsWith(raw, "[PMX]:")) {
+                if (++messagesInWindow > kMaxMessagesPerMinute) {
+                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
+                    continue;
+                }
+                const bool queueIfOffline = StartsWith(raw, "[PM2]:");
+                const std::string rest = raw.substr(6);
+                const std::size_t sep = rest.find(':');
+                std::string target;
+                std::string envelope;
+                std::string envelopeB64;
+                if (sep != std::string::npos) target = rest.substr(0, sep);
+                if (sep == std::string::npos || !IsValidUsername(target) ||
+                    !DecodeB64Field(rest.substr(sep + 1), envelope, envelopeB64) ||
+                    envelope.size() < river::e2e::kEnvelopeOverhead ||
+                    envelope.size() > kMaxPrivateEnvelopeBytes) {
+                    SendLine(clientSocket, "SYSTEM: MENSAJE PRIVADO RECHAZADO.");
+                    continue;
+                }
+                RoutePrivateEnvelope(clientSocket, currentNick, target, envelopeB64, queueIfOffline);
+            } else if (StartsWith(raw, "[ATTACH2]:")) {
                 if (++attachmentsInWindow > kMaxAttachmentsPerMinute) {
                     SendLine(clientSocket, "SYSTEM: LIMITE DE ADJUNTOS EXCEDIDO.");
                     continue;
@@ -1199,78 +1393,23 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
                     SendLine(clientSocket, "SYSTEM: ADJUNTO RECHAZADO POR TAMANO.");
                     continue;
                 }
-                Broadcast("[ATTACH]:" + currentNick + ":" + raw.substr(9));
-            } else if (StartsWith(raw, "[PM]:") && authed) {
-                if (++messagesInWindow > kMaxMessagesPerMinute) {
-                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
+                // <id>:<kind>:<nameB64>:<mimeB64>:<size>
+                const std::vector<std::string> f = SplitFields(raw.substr(10));
+                std::string name, nameB64, mime, mimeB64;
+                unsigned long long size = 0;
+                const bool valid =
+                    f.size() == 5 &&
+                    !f[0].empty() && f[0].size() <= kMaxAttachmentIdChars && !HasControlOrSeparator(f[0]) &&
+                    (f[1] == "image" || f[1] == "video" || f[1] == "file") &&
+                    DecodeB64Field(f[2], name, nameB64) && !name.empty() && name.size() <= kMaxAttachmentNameBytes &&
+                    DecodeB64Field(f[3], mime, mimeB64) && mime.size() <= kMaxAttachmentMimeBytes &&
+                    ParseStrictUnsigned(f[4], kMaxAttachmentBytes, size) && size > 0;
+                if (!valid) {
+                    SendLine(clientSocket, "SYSTEM: ADJUNTO RECHAZADO.");
                     continue;
                 }
-                std::string rest = raw.substr(5);
-                size_t firstSep = rest.find(':');
-                if (firstSep == std::string::npos) continue;
-                std::string target = rest.substr(0, firstSep);
-                std::string remaining = rest.substr(firstSep + 1);
-                size_t secondSep = remaining.find(':');
-                if (secondSep == std::string::npos) continue;
-                std::string encPayload = remaining.substr(secondSep + 1);
-                if (!IsValidUsername(target) || encPayload.size() > kMaxChatPayloadBytes) {
-                    SendLine(clientSocket, "SYSTEM: MENSAJE PRIVADO RECHAZADO.");
-                    continue;
-                }
-                if (!SendPrivateMessage(target, currentNick, encPayload))
-                    SendLine(clientSocket, "SYSTEM: Usuario '" + target + "' no encontrado.");
-            } else if (authed && isAdmin) {
-                if (++messagesInWindow > kMaxMessagesPerMinute) {
-                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
-                    continue;
-                }
-                std::string payload = raw;
-                size_t sep = raw.find(':');
-                if (sep != std::string::npos) payload = raw.substr(sep + 1);
-                if (payload.size() > kMaxChatPayloadBytes) {
-                    SendLine(clientSocket, "SYSTEM: MENSAJE DEMASIADO GRANDE.");
-                    continue;
-                }
-
-                std::string dec;
-                const bool opened = river::OpenPayload(payload, dec);
-                if (StartsWith(dec, "/")) {
-                    ClientSession currentClient;
-                    {
-                        std::lock_guard<std::mutex> lk(clientsMutex_);
-                        currentClient = clients_[clientSocket];
-                    }
-                    HandleAdminCommand(clientSocket, currentClient, dec);
-                } else if (opened) {
-                    LogEncryptedMessage(currentNick, payload);
-                    Broadcast(currentNick + ":" + payload);
-                } else {
-                    SendLine(clientSocket, "SYSTEM: MENSAJE RECHAZADO POR AUTENTICACION.");
-                }
-            } else if (authed) {
-                if (++messagesInWindow > kMaxMessagesPerMinute) {
-                    SendLine(clientSocket, "SYSTEM: LIMITE DE MENSAJES EXCEDIDO.");
-                    continue;
-                }
-                std::string payload = raw;
-                size_t sep = raw.find(':');
-                if (sep != std::string::npos) payload = raw.substr(sep + 1);
-                if (payload.size() > kMaxChatPayloadBytes) {
-                    SendLine(clientSocket, "SYSTEM: MENSAJE DEMASIADO GRANDE.");
-                    continue;
-                }
-                std::string plainCheck;
-                if (!river::OpenPayload(payload, plainCheck)) {
-                    SendLine(clientSocket, "SYSTEM: MENSAJE RECHAZADO POR AUTENTICACION.");
-                    continue;
-                }
-                if (StartsWith(plainCheck, "/")) {
-                    // Never broadcast mistyped commands from regular users to the room.
-                    SendLine(clientSocket, "SYSTEM: Comando no disponible. Usa /help para ver los comandos.");
-                    continue;
-                }
-                LogEncryptedMessage(currentNick, payload);
-                Broadcast(currentNick + ":" + payload);
+                Broadcast("ATTACH2:" + currentNick + ":" + f[0] + ":" + f[1] + ":" + nameB64 + ":" + mimeB64 + ":" +
+                          std::to_string(size));
             }
         if (closeForRateLimit) break;
     }

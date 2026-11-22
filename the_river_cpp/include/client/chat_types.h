@@ -23,4 +23,8 @@ struct LogEntry {
     bool isPM = false;
     bool isAttachment = false;
     AttachmentPayload attachment;
+    // Server timestamp of MSG/HIST/PM2 entries (0 for local lines).
+    long long unixTs = 0;
+    // Entry came from the HISTORY block (never raises a new-message notification).
+    bool isHistory = false;
 };

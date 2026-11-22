@@ -32,7 +32,11 @@
 // block on the network.
 //
 // Lock ordering (acquire left to right, never the reverse):
-//   clientsMutex_ -> channelsMutex_ -> SocketChannel::mutex
+//   deliveryMutex_ -> clientsMutex_ -> channelsMutex_ -> SocketChannel::mutex
+//   deliveryMutex_ serializes "store room message + broadcast MSG",
+//   "route PM2 (deliver or queue)" and "register session + replay history +
+//   drain offline PMs", so a login never misses or duplicates a MSG/PM2.
+//   The repository's own mutex is a leaf.
 //   attemptsMutex_ -> logMutex_
 //   handlersMutex_ is a leaf. logMutex_ is never taken while holding a
 //   SocketChannel::mutex (log after releasing it).
@@ -114,7 +118,6 @@ private:
     void Broadcast(const std::string& msg);
     void BroadcastUsers();
     bool SendDirectLineToUser(const std::string& toNick, const std::string& line);
-    bool SendPrivateMessage(const std::string& toNick, const std::string& fromNick, const std::string& encPayload);
     bool RelayAttachmentChunk(const std::string& fromNick, const std::string& payload);
     bool KickUser(const std::string& nick, const std::string& reason);
     bool DescribeUser(const std::string& nick, ClientSession& session);
@@ -123,11 +126,24 @@ private:
     void LogEncryptedMessage(const std::string& user, const std::string& encryptedPayload);
     void LogRuntime(const std::string& category, const std::string& message);
     std::string BuildUsersSnapshot();
-    LoginResult AuthorizeLogin(const std::string& username, const std::string& password, const std::string& hwid);
+    // SCRAM proof check plus lockout / HWID policy. On Ok/FirstLogin,
+    // serverSignatureRaw holds the 32-byte ServerSignature for AUTH_OK.
     LoginResult AuthorizeLoginProof(const std::string& username,
-                                    const std::string& proof,
-                                    const std::string& nonce,
-                                    const std::string& hwid);
+                                    const std::string& hwid,
+                                    const std::string& authMessage,
+                                    const std::string& clientProofRaw,
+                                    std::string& serverSignatureRaw);
+    // Deterministic fake challenge parameters for unknown users (spec 2).
+    std::string FakeSaltHex(const std::string& username) const;
+    // Registers the session and sends ACCESO CONCEDIDO, SESSION, history and
+    // queued offline PMs (in that order), then the join broadcast + user list.
+    void CompleteLogin(SocketHandle clientSocket, const ClientSession& session, bool afterChange);
+    // PM2/PMX routing. queueIfOffline=false for PMX.
+    void RoutePrivateEnvelope(SocketHandle senderSocket,
+                              const std::string& fromNick,
+                              const std::string& toNick,
+                              const std::string& envelopeB64,
+                              bool queueIfOffline);
     void AuditAdminAction(const std::string& admin, const std::string& action, const std::string& detail);
 
     std::string dbPath_;
@@ -150,4 +166,7 @@ private:
     std::mutex channelsMutex_;
     std::mutex attemptsMutex_;
     std::mutex logMutex_;
+    std::mutex deliveryMutex_;
+    // Per-process random secret for fake salts (never persisted).
+    std::string fakeSaltSecret_;
 };

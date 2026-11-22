@@ -11,6 +11,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -19,7 +20,8 @@
 #include "client/attachment_utils.h"
 #include "client/platform_runtime.h"
 #include "common/base64.h"
-#include "common/secure_envelope.h"
+#include "common/e2e_crypto.h"
+#include "common/scram.h"
 #include "common/security_utils.h"
 #include "common/shared_config.h"
 #include "common/tor_connection.h"
@@ -141,6 +143,81 @@ void AppendSizedString(std::string& out, const std::string& value) {
     out.append(value);
 }
 
+constexpr std::size_t kMaxRoomTextBytes = 8 * 1024;  // spec 4.1 payload limit
+constexpr std::size_t kMaxPendingPerPeer = 64;
+constexpr const char* kKnownKeysFile = "river_known_keys.txt";
+constexpr int kMaxKnownKeyLines = 10000;
+constexpr const char* kIncompatibleServerError = "Servidor incompatible (se requiere protocolo 2).";
+
+bool FileExists(const std::string& path) {
+    if (path.empty()) return false;
+    std::ifstream input(path, std::ios::binary);
+    return input.is_open();
+}
+
+// Attachment ids travel in ':'-separated lines and '|'-separated control
+// strings and end up in cache file names, so only a conservative alphabet is
+// accepted (our own ids are "att<ms>_<n>").
+bool IsValidAttachmentId(const std::string& id) {
+    if (id.empty() || id.size() > 80 || id[0] == '.') return false;
+    for (unsigned char c : id) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool ParseUnixTs(const std::string& value, long long& out) {
+    if (value.empty() || value.size() > 18) return false;
+    long long result = 0;
+    for (char c : value) {
+        if (c < '0' || c > '9') return false;
+        result = result * 10 + (c - '0');
+    }
+    out = result;
+    return true;
+}
+
+bool ParseIterations(const std::string& value, int& out) {
+    if (value.empty() || value.size() > 9) return false;
+    int result = 0;
+    for (char c : value) {
+        if (c < '0' || c > '9') return false;
+        result = result * 10 + (c - '0');
+    }
+    out = result;
+    return true;
+}
+
+// "<from>:<unixTs>:<payload>" (the part after "MSG:", "HIST:", "PM2:", "PMX:").
+bool SplitSenderTsPayload(const std::string& rest, std::string& from, long long& ts, std::string& payload) {
+    const std::size_t first = rest.find(':');
+    if (first == std::string::npos || first == 0) return false;
+    const std::size_t second = rest.find(':', first + 1);
+    if (second == std::string::npos) return false;
+    from = rest.substr(0, first);
+    if (!ParseUnixTs(rest.substr(first + 1, second - first - 1), ts)) return false;
+    payload = rest.substr(second + 1);
+    return true;
+}
+
+// True if the banner advertises exactly protocol 2 ("PROTO=2", not "PROTO=20").
+bool BannerHasProto2(const std::string& line) {
+    std::size_t pos = line.find("PROTO=2");
+    while (pos != std::string::npos) {
+        const std::size_t end = pos + 7;
+        if (end >= line.size() || line[end] < '0' || line[end] > '9') return true;
+        pos = line.find("PROTO=2", end);
+    }
+    return false;
+}
+
+void WipeString(std::string& value) {
+    for (char& c : value) c = '\0';
+    value.clear();
+}
+
 // Server control lines always start with "SYSTEM:"; matching only those keeps
 // chat text or nicknames (e.g. "ACTUALIZADO se unio") from triggering state changes.
 bool IsSystemNotice(const std::string& line, const char* token) {
@@ -233,7 +310,6 @@ void RemovePartFile(const std::string& partPath) {
 }
 
 }  // namespace attachment_part
-
 ChatClient::ChatClient(ChatState& state) : state_(state) {}
 
 ChatClient::~ChatClient() {
@@ -253,6 +329,7 @@ void ChatClient::Stop() {
     CloseCurrentSocket();
     if (networkThread_.joinable()) networkThread_.join();
     ReapFinishedUploads(true);
+    ClearE2EState(false);
 }
 
 void ChatClient::Logout() {
@@ -260,9 +337,11 @@ void ChatClient::Logout() {
     QueueAutoLogin("", "");
     {
         std::lock_guard<std::mutex> lock(reloginMutex_);
-        pendingLoginUser_.clear();
-        pendingLoginPass_.clear();
+        WipeString(pendingLoginUser_);
+        WipeString(pendingLoginPass_);
     }
+    ResetAuthExchange();
+    ClearE2EState(false);
     SetCurrentUser("");
     state_.SetLastPrivatePeer("");
     state_.AddSystemLog("SYSTEM: Sesion cerrada localmente.");
@@ -283,8 +362,8 @@ void ChatClient::RememberSessionCredentials() {
 
 void ChatClient::ForgetSessionCredentials() {
     std::lock_guard<std::mutex> lock(reloginMutex_);
-    rememberedUser_.clear();
-    rememberedPass_.clear();
+    WipeString(rememberedUser_);
+    WipeString(rememberedPass_);
 }
 
 bool ChatClient::ConsumeRememberedCredentials(std::string& user, std::string& pass) {
@@ -323,14 +402,15 @@ void ChatClient::ReapFinishedUploads(bool joinAll) {
 }
 
 void ChatClient::StartAttachmentUpload(const std::string& requester,
+                                       const std::string& requesterPub,
                                        const std::string& attachmentId,
                                        const std::string& mode) {
     ReapFinishedUploads(false);
     // Uploads run off the receive thread so heartbeats and chat keep flowing
     // while a large file streams to the requester.
     auto done = std::make_shared<std::atomic<bool>>(false);
-    std::thread worker([this, requester, attachmentId, mode, done]() {
-        HandleAttachmentRequest(requester, attachmentId, mode);
+    std::thread worker([this, requester, requesterPub, attachmentId, mode, done]() {
+        HandleAttachmentRequest(requester, requesterPub, attachmentId, mode);
         done->store(true);
     });
     std::lock_guard<std::mutex> lock(uploadsMutex_);
@@ -390,20 +470,103 @@ void ChatClient::QueueChallengeLogin(const std::string& user, const std::string&
     pendingLoginPass_ = pass;
 }
 
-bool ChatClient::SendChallengeLogin(const std::string& challengeLine) {
-    std::lock_guard<std::mutex> lock(reloginMutex_);
-    if (pendingLoginUser_.empty() || pendingLoginPass_.empty()) return false;
+// ---------------------------------------------------------------------------
+// v2 authentication
+// ---------------------------------------------------------------------------
 
+void ChatClient::ResetAuthExchange() {
+    std::lock_guard<std::mutex> lock(reloginMutex_);
+    authClientNonce_.clear();
+    WipeString(authExpectedServerSig_);
+    authHwid_.clear();
+    authVerified_.store(false);
+}
+
+bool ChatClient::SendAuthProof(const std::string& challengeLine) {
+    // AUTH_CHALLENGE2:<combinedNonceHex>:<saltHex>:<iter>
     const std::vector<std::string> parts = SplitByDelimiter(challengeLine, ':');
-    if (parts.size() < 3) return false;
-    const std::string& nonce = parts[1];
-    const std::string& hashSpec = parts[2];
-    const std::string hwid = MakeStableMachineId();
-    const std::string verifier = DerivePasswordVerifier(pendingLoginPass_, hashSpec);
-    if (verifier.empty()) return false;
-    const std::string proof = HmacSha256Hex(verifier, nonce + "|" + pendingLoginUser_ + "|" + hwid);
-    const std::string user = pendingLoginUser_;
-    return SendRawLine("[LOGIN_PROOF]:" + user + ":" + hwid + ":" + proof + "\n") >= 0;
+    if (parts.size() != 4) return false;
+    const std::string& combined = parts[1];
+    const std::string& saltHex = parts[2];
+    int iterations = 0;
+    if (!ParseIterations(parts[3], iterations)) return false;
+
+    std::string user;
+    std::string pass;
+    std::string hwid;
+    std::string clientNonce;
+    {
+        std::lock_guard<std::mutex> lock(reloginMutex_);
+        if (pendingLoginUser_.empty() || pendingLoginPass_.empty() || authClientNonce_.empty()) return false;
+        user = pendingLoginUser_;
+        pass = pendingLoginPass_;
+        hwid = authHwid_;
+        clientNonce = authClientNonce_;
+        // One challenge per AUTH_START: a replayed or second challenge fails.
+        authClientNonce_.clear();
+    }
+
+    bool ok = combined.size() == clientNonce.size() + 32 &&
+              combined.compare(0, clientNonce.size(), clientNonce) == 0 &&
+              river::scram::IsHexString(combined, combined.size()) &&
+              river::scram::IsValidSaltHex(saltHex) &&
+              river::scram::IsValidIterations(iterations);
+    std::string proof;
+    std::string expectedSig;
+    if (ok) {
+        const std::string authMessage =
+            river::scram::BuildAuthMessage(user, hwid, clientNonce, combined, saltHex, iterations);
+        ok = !authMessage.empty() &&
+             river::scram::ComputeClientProof(pass, saltHex, iterations, authMessage, proof, expectedSig);
+    }
+    WipeString(pass);
+    if (!ok) return false;
+
+    {
+        std::lock_guard<std::mutex> lock(reloginMutex_);
+        authExpectedServerSig_ = expectedSig;
+    }
+    WipeString(expectedSig);
+    const bool sent = SendRawLine("[AUTH_PROOF]:" + user + ":" + hwid + ":" + combined + ":" +
+                                  river::base64::EncodeString(proof)) >= 0;
+    WipeString(proof);
+    return sent;
+}
+
+bool ChatClient::VerifyAuthOk(const std::string& line) {
+    std::string expected;
+    {
+        std::lock_guard<std::mutex> lock(reloginMutex_);
+        expected = authExpectedServerSig_;
+        WipeString(authExpectedServerSig_);
+    }
+    if (expected.empty()) return false;
+    std::string received;
+    const bool ok = river::base64::DecodeToString(line.substr(8), received) &&
+                    river::scram::VerifyServerSignature(expected, received);
+    WipeString(expected);
+    if (ok) authVerified_.store(true);
+    return ok;
+}
+
+void ChatClient::FailAuthFatal(const std::string& reason) {
+    AppendClientLog("Auth fatal");
+    // Never retry these credentials automatically against a server that could
+    // not prove it knows them.
+    ForgetSessionCredentials();
+    QueueAutoLogin("", "");
+    ResetAuthExchange();
+    {
+        std::lock_guard<std::mutex> lock(reloginMutex_);
+        disconnectNotice_ = reason;
+    }
+    state_.SetAuthenticated(false);
+    state_.SetAuthActionPending(false);
+    state_.SetCredentialChangePending(false);
+    state_.SetMustChangeCredentials(false);
+    state_.SetLastError(reason);
+    state_.AddSystemLog("SYSTEM: " + reason);
+    CloseCurrentSocket();
 }
 
 int ChatClient::SendRawLine(const std::string& payload) {
@@ -428,13 +591,14 @@ int ChatClient::SendRawLine(const std::string& payload) {
     return static_cast<int>(framePayload.size());
 }
 
-bool ChatClient::SendEncryptedPayload(const std::string& user, const std::string& payload) {
-    return SendRawLine(user + ":" + river::SealPayload(payload) + "\n") >= 0;
-}
-
 void ChatClient::CloseCurrentSocket() {
     std::lock_guard<std::mutex> lock(socketMutex_);
     if (!IsSocketValid(socket_)) return;
+#ifdef _WIN32
+    shutdown(socket_, SD_BOTH);
+#else
+    shutdown(socket_, SHUT_RDWR);
+#endif
     CloseSocketHandle(socket_);
     socket_ = kInvalidSocket;
 }
@@ -442,13 +606,40 @@ void ChatClient::CloseCurrentSocket() {
 bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
     SetCurrentUser(user);
     state_.ClearLastError();
-    state_.SetAuthActionPending(true);
     state_.SetCredentialChangePending(false);
+    AppendClientLog("SendLogin");
+    if (bannerState_.load() == 2) {
+        state_.SetAuthActionPending(false);
+        state_.SetLastError(kIncompatibleServerError);
+        return false;
+    }
+    if (user.empty() || user.size() > 64 || user.find_first_of(":|\r\n") != std::string::npos || pass.empty()) {
+        state_.SetAuthActionPending(false);
+        state_.SetLastError("Identificador o clave invalidos.");
+        return false;
+    }
+    state_.SetAuthActionPending(true);
     state_.SetConnectionState(ConnState::AUTHENTICATING);
     state_.SetStatusDetail("Autenticando credenciales...");
-    AppendClientLog("SendLogin");
+    if (bannerState_.load() == 0) {
+        // The server has not confirmed PROTO=2 yet: log in once its banner arrives.
+        QueueAutoLogin(user, pass);
+        state_.SetStatusDetail("Esperando banner del servidor...");
+        return true;
+    }
+
     QueueChallengeLogin(user, pass);
-    if (SendRawLine("[LOGIN_INIT]:" + user + ":" + MakeStableMachineId() + "\n") < 0) {
+    const std::string nonce = river::scram::RandomNonceHex(16);
+    const std::string hwid = MakeStableMachineId();
+    {
+        std::lock_guard<std::mutex> lock(reloginMutex_);
+        authClientNonce_ = nonce;
+        WipeString(authExpectedServerSig_);
+        authHwid_ = hwid;
+    }
+    authVerified_.store(false);
+    if (nonce.empty() || hwid.find_first_of(":|") != std::string::npos ||
+        SendRawLine("[AUTH_START]:2:" + user + ":" + hwid + ":" + nonce + "\n") < 0) {
         state_.SetAuthActionPending(false);
         state_.SetLastError("No hay canal disponible para enviar el login.");
         state_.SetStatusDetail("Sin enlace activo hacia el servidor.");
@@ -459,12 +650,31 @@ bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
 
 bool ChatClient::SendFirstLoginChange(const std::string& newUser, const std::string& newPass) {
     state_.ClearLastError();
+    if (!IsValidUsername(newUser)) {
+        state_.SetLastError("Identificador invalido: 3-24 caracteres (letras, numeros, '_' o '-').");
+        return false;
+    }
+    if (!IsStrongEnoughPassword(newPass)) {
+        state_.SetLastError("Clave demasiado debil: usa entre 12 y 128 caracteres y no incluyas ':'.");
+        return false;
+    }
+    if (!authVerified_.load()) {
+        state_.SetLastError("No hay una autenticacion verificada para actualizar credenciales.");
+        return false;
+    }
+    // The password never leaves the client: only the SCRAM credential is sent.
+    river::scram::Credential credential;
+    if (!river::scram::MakeCredential(newPass, credential)) {
+        state_.SetLastError("No se pudo derivar la nueva credencial.");
+        return false;
+    }
     state_.SetCredentialChangePending(true);
     state_.SetConnectionState(ConnState::UPDATING_CREDENTIALS);
     state_.SetStatusDetail("Actualizando identidad inicial...");
     QueueAutoLogin(newUser, newPass);
-    const std::string encPass = river::SealPayload(newPass);
-    if (SendRawLine("[CHANGE]:" + newUser + ":" + encPass + "\n") < 0) {
+    if (SendRawLine("[CHANGE2]:" + newUser + ":" + credential.saltHex + ":" +
+                    std::to_string(credential.iterations) + ":" + credential.storedKeyHex + ":" +
+                    credential.serverKeyHex + "\n") < 0) {
         state_.SetCredentialChangePending(false);
         QueueAutoLogin("", "");
         state_.SetLastError("Could not send the initial credential change.");
@@ -489,22 +699,452 @@ bool ChatClient::SendPing() {
     return true;
 }
 
-bool ChatClient::SendChatMessage(const std::string& user, const std::string& input) {
-    if (!SendEncryptedPayload(user, input)) {
+bool ChatClient::SendChatMessage(const std::string& /*user*/, const std::string& input) {
+    if (input.size() > kMaxRoomTextBytes) {
+        state_.SetLastError("Mensaje demasiado largo (maximo 8 KiB).");
+        return false;
+    }
+    if (SendRawLine("[MSG]:" + river::base64::EncodeString(input) + "\n") < 0) {
         state_.SetLastError("Could not send the message. Channel unavailable.");
         return false;
     }
     return true;
 }
 
-bool ChatClient::SendPrivateMessage(const std::string& fromUser, const std::string& target, const std::string& message) {
-    std::string enc = river::SealPayload(message);
-    if (SendRawLine("[PM]:" + target + ":" + fromUser + ":" + enc + "\n") < 0) {
+bool ChatClient::SendPrivateMessage(const std::string& /*fromUser*/, const std::string& target, const std::string& message) {
+    if (!HasIdentity()) {
+        state_.SetLastError("No hay clave de identidad cargada: los mensajes privados requieren una sesion activa.");
+        return false;
+    }
+    if (!SendSealedToUser(target, message, false)) {
         state_.SetLastError("Could not send the private message.");
         return false;
     }
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Identity keys, key directory, TOFU pins
+// ---------------------------------------------------------------------------
+
+bool ChatClient::HasIdentity() const {
+    std::lock_guard<std::mutex> lock(identityKeyMutex_);
+    return river::e2e::IsValidKeyPair(identityKey_);
+}
+
+std::string ChatClient::OwnPublicKey() const {
+    std::lock_guard<std::mutex> lock(identityKeyMutex_);
+    return river::e2e::IsValidKeyPair(identityKey_) ? identityKey_.pub32 : std::string();
+}
+
+bool ChatClient::SealWithIdentity(const std::string& context,
+                                  const std::string& fromUser,
+                                  const std::string& toUser,
+                                  const std::string& recipientPub,
+                                  const std::string& plaintext,
+                                  std::string& envelope) const {
+    std::lock_guard<std::mutex> lock(identityKeyMutex_);
+    if (!river::e2e::IsValidKeyPair(identityKey_)) return false;
+    return river::e2e::Seal(identityKey_, recipientPub, context, fromUser, toUser, plaintext, envelope);
+}
+
+bool ChatClient::OpenWithIdentity(const std::string& context,
+                                  const std::string& fromUser,
+                                  const std::string& toUser,
+                                  const std::string& senderPub,
+                                  const std::string& envelope,
+                                  std::string& plaintext) const {
+    std::lock_guard<std::mutex> lock(identityKeyMutex_);
+    if (!river::e2e::IsValidKeyPair(identityKey_)) return false;
+    return river::e2e::Open(identityKey_, senderPub, context, fromUser, toUser, envelope, plaintext);
+}
+
+bool ChatClient::LoadOrCreateIdentity(const std::string& user,
+                                      const std::string& pass,
+                                      const std::string& oldUser,
+                                      const std::string& oldPass) {
+    const std::string newPath = river::e2e::IdentityFileName(user);
+    if (newPath.empty() || pass.empty()) return false;
+    const bool changed = !oldUser.empty() && !oldPass.empty();
+    const std::string oldPath = changed ? river::e2e::IdentityFileName(oldUser) : std::string();
+
+    river::e2e::KeyPair keyPair;
+    bool loaded = false;
+    bool hadFile = false;
+    if (changed && !oldPath.empty()) {
+        // First-login change: keep the existing key, re-encrypted under the new password.
+        hadFile = FileExists(oldPath);
+        loaded = hadFile && river::e2e::LoadIdentity(oldPath, oldPass, keyPair);
+    }
+    if (!loaded) {
+        const bool newExists = FileExists(newPath);
+        hadFile = hadFile || newExists;
+        loaded = newExists && river::e2e::LoadIdentity(newPath, pass, keyPair);
+    }
+    bool generated = false;
+    if (!loaded) {
+        if (!river::e2e::GenerateKeyPair(keyPair)) return false;
+        generated = true;
+    }
+
+    bool saved = true;
+    if (generated || changed) saved = river::e2e::SaveIdentity(newPath, keyPair, pass);
+    if (saved && changed && !oldPath.empty() && oldPath != newPath) std::remove(oldPath.c_str());
+
+    const std::string fingerprint = river::e2e::Fingerprint(keyPair.pub32);
+    {
+        std::lock_guard<std::mutex> lock(identityKeyMutex_);
+        river::e2e::Clear(identityKey_);
+        identityKey_.priv32 = keyPair.priv32;
+        identityKey_.pub32 = keyPair.pub32;
+    }
+    if (generated) {
+        state_.AddSystemLog(hadFile
+            ? "SYSTEM: No se pudo abrir la clave de identidad local; se genero una nueva (huella " + fingerprint +
+                  "). Tus contactos veran un aviso de cambio de clave."
+            : "SYSTEM: Clave de identidad generada (huella " + fingerprint + ").");
+    }
+    if (!saved) state_.AddSystemLog("SYSTEM: No se pudo guardar la clave de identidad en disco; solo vale para esta sesion.");
+    return true;
+}
+
+void ChatClient::PublishIdentityKey() {
+    const std::string pub = OwnPublicKey();
+    if (pub.empty()) return;
+    if (SendRawLine("[KEY_SET]:" + river::base64::EncodeString(pub) + "\n") < 0) {
+        state_.SetLastError("No se pudo publicar la clave publica.");
+    }
+}
+
+void ChatClient::ClearE2EState(bool notifyPending) {
+    {
+        std::lock_guard<std::mutex> lock(identityKeyMutex_);
+        river::e2e::Clear(identityKey_);
+    }
+    std::map<std::string, std::vector<PendingOutgoingSealed>> outgoing;
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        peerKeys_.clear();
+        keyRequestsInFlight_.clear();
+        outgoing.swap(pendingOutgoing_);
+        pendingIncoming_.clear();
+        pendingFingerprint_.clear();
+    }
+    for (auto& entry : outgoing) {
+        bool hadText = false;
+        for (auto& item : entry.second) {
+            if (!item.control) hadText = true;
+            WipeString(item.plaintext);
+        }
+        if (notifyPending && hadText)
+            state_.AddSystemLog("SYSTEM: Mensaje privado a " + entry.first + " no enviado (enlace perdido).");
+    }
+}
+
+bool ChatClient::CachedPeerKey(const std::string& user, std::string& pub) const {
+    std::lock_guard<std::mutex> lock(peerMutex_);
+    auto it = peerKeys_.find(user);
+    if (it == peerKeys_.end()) return false;
+    pub = it->second;
+    return true;
+}
+
+void ChatClient::RequestPeerKey(const std::string& user) {
+    bool send = false;
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        send = keyRequestsInFlight_.insert(user).second;
+    }
+    if (send && SendRawLine("[KEY_GET]:" + user + "\n") < 0) {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        keyRequestsInFlight_.erase(user);
+    }
+}
+
+bool ChatClient::SealAndSendLine(bool control,
+                                 const std::string& target,
+                                 const std::string& targetPub,
+                                 const std::string& plaintext) {
+    const std::string me = CurrentUser();
+    if (me.empty()) return false;
+    std::string envelope;
+    if (!SealWithIdentity("pm", me, target, targetPub, plaintext, envelope)) return false;
+    return SendRawLine(std::string(control ? "[PMX]:" : "[PM2]:") + target + ":" +
+                       river::base64::EncodeString(envelope) + "\n") >= 0;
+}
+
+bool ChatClient::SendSealedToUser(const std::string& target, const std::string& plaintext, bool control) {
+    if (!HasIdentity() || CurrentUser().empty() || !IsValidUsername(target)) return false;
+    std::string pub;
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        auto it = peerKeys_.find(target);
+        if (it != peerKeys_.end()) {
+            pub = it->second;
+        } else {
+            auto& queue = pendingOutgoing_[target];
+            if (queue.size() >= kMaxPendingPerPeer) return false;
+            queue.push_back({control, plaintext});
+            queued = true;
+        }
+    }
+    if (queued) {
+        // Sent once the KEY: reply arrives (HandleKeyReply).
+        RequestPeerKey(target);
+        return true;
+    }
+    return SealAndSendLine(control, target, pub, plaintext);
+}
+
+void ChatClient::LoadKnownKeysLocked() {
+    if (pinsLoaded_) return;
+    pinsLoaded_ = true;
+    std::ifstream input(kKnownKeysFile);
+    if (!input.is_open()) return;
+    std::string line;
+    int lines = 0;
+    while (lines++ < kMaxKnownKeyLines && std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::size_t space = line.find(' ');
+        if (space == std::string::npos) continue;
+        const std::string user = line.substr(0, space);
+        const std::string fingerprint = line.substr(space + 1);
+        if (!IsValidUsername(user) || fingerprint.empty() || fingerprint.size() > 64) continue;
+        knownKeyPins_[user] = fingerprint;
+    }
+}
+
+bool ChatClient::SaveKnownKeysLocked() const {
+    const std::string target = kKnownKeysFile;
+    const std::string temp = target + ".tmp";
+    {
+        std::ofstream out(temp, std::ios::trunc);
+        if (!out.is_open()) return false;
+        for (const auto& entry : knownKeyPins_) out << entry.first << " " << entry.second << "\n";
+        out.flush();
+        if (!out.good()) {
+            out.close();
+            std::remove(temp.c_str());
+            return false;
+        }
+    }
+    if (std::rename(temp.c_str(), target.c_str()) != 0) {
+        // Windows rename() refuses to overwrite an existing file.
+        std::remove(target.c_str());
+        if (std::rename(temp.c_str(), target.c_str()) != 0) {
+            std::remove(temp.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+void ChatClient::CheckAndPinPeerKey(const std::string& user, const std::string& pub) {
+    const std::string fingerprint = river::e2e::Fingerprint(pub);
+    if (fingerprint.empty()) return;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(pinsMutex_);
+        LoadKnownKeysLocked();
+        auto it = knownKeyPins_.find(user);
+        bool save = false;
+        if (it == knownKeyPins_.end()) {
+            knownKeyPins_[user] = fingerprint;  // first sight: trust on first use
+            save = true;
+        } else if (it->second != fingerprint) {
+            it->second = fingerprint;
+            changed = true;
+            save = true;
+        }
+        if (save) SaveKnownKeysLocked();
+    }
+    if (changed) {
+        state_.AddSystemLog("[!] La clave de " + user + " cambio (huella " + fingerprint +
+                            "). Verificala por otro canal.");
+    }
+}
+
+void ChatClient::HandleKeyReply(const std::string& rest) {
+    // KEY:<user>:<pubkeyB64>  or  KEY:<user>:-
+    const std::size_t sep = rest.find(':');
+    if (sep == std::string::npos) return;
+    const std::string user = rest.substr(0, sep);
+    const std::string value = rest.substr(sep + 1);
+    if (!IsValidUsername(user)) return;
+
+    std::string pub;
+    const bool hasKey = value != "-" && river::base64::DecodeToString(value, pub) &&
+                        pub.size() == river::e2e::kKeyBytes;
+    std::vector<PendingOutgoingSealed> outgoing;
+    std::vector<PendingIncomingSealed> incoming;
+    bool wantedFingerprint = false;
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        keyRequestsInFlight_.erase(user);
+        if (hasKey) peerKeys_[user] = pub;
+        else peerKeys_.erase(user);
+        auto out = pendingOutgoing_.find(user);
+        if (out != pendingOutgoing_.end()) {
+            outgoing.swap(out->second);
+            pendingOutgoing_.erase(out);
+        }
+        auto in = pendingIncoming_.find(user);
+        if (in != pendingIncoming_.end()) {
+            incoming.swap(in->second);
+            pendingIncoming_.erase(in);
+        }
+        wantedFingerprint = pendingFingerprint_.erase(user) > 0;
+    }
+
+    if (!hasKey) {
+        const std::string noKey = user + " aun no tiene clave publica.";
+        bool reported = false;
+        for (auto& item : outgoing) {
+            if (item.control && item.plaintext.rfind("@attachreq|", 0) == 0) {
+                const std::vector<std::string> parts = SplitByDelimiter(item.plaintext, '|');
+                if (parts.size() >= 2) {
+                    IncomingAttachmentTransfer dropped;
+                    {
+                        std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
+                        auto it = incomingAttachments_.find(user + "|" + parts[1]);
+                        if (it != incomingAttachments_.end()) {
+                            dropped = std::move(it->second);
+                            incomingAttachments_.erase(it);
+                        }
+                    }
+                    DiscardIncomingTransfer(dropped);
+                    state_.UpdateAttachmentState(user, parts[1], AttachmentTransferState::Failed);
+                }
+            }
+            WipeString(item.plaintext);
+            reported = true;
+        }
+        if (reported || wantedFingerprint) {
+            state_.SetLastError(noKey);
+            state_.AddSystemLog("SYSTEM: " + noKey);
+        }
+        for (std::size_t i = 0; i < incoming.size(); ++i) state_.AddSystemLog("[PM ilegible de " + user + "]");
+        return;
+    }
+
+    CheckAndPinPeerKey(user, pub);
+    if (wantedFingerprint)
+        state_.AddSystemLog("SYSTEM: Huella de " + user + ": " + river::e2e::Fingerprint(pub));
+    for (auto& item : outgoing) {
+        if (!SealAndSendLine(item.control, user, pub, item.plaintext) && !item.control)
+            state_.AddSystemLog("SYSTEM: Could not send the private message.");
+        WipeString(item.plaintext);
+    }
+    for (const auto& item : incoming) DeliverIncomingSealed(user, pub, item);
+}
+
+void ChatClient::HandleKeyChanged(const std::string& user) {
+    if (!IsValidUsername(user) || user == CurrentUser()) return;
+    std::lock_guard<std::mutex> lock(peerMutex_);
+    peerKeys_.erase(user);
+}
+
+void ChatClient::ShowFingerprint(const std::string& user) {
+    const std::string me = CurrentUser();
+    if (user.empty() || user == me) {
+        const std::string pub = OwnPublicKey();
+        if (pub.empty()) {
+            state_.AddSystemLog("SYSTEM: No hay clave de identidad cargada (inicia sesion).");
+        } else {
+            state_.AddSystemLog("SYSTEM: Tu huella: " + river::e2e::Fingerprint(pub));
+        }
+        return;
+    }
+    if (!IsValidUsername(user)) {
+        state_.AddSystemLog("SYSTEM: Invalid target user '" + user + "'.");
+        return;
+    }
+    std::string pub;
+    if (CachedPeerKey(user, pub)) {
+        state_.AddSystemLog("SYSTEM: Huella de " + user + ": " + river::e2e::Fingerprint(pub));
+        return;
+    }
+    if (!state_.IsAuthenticated()) {
+        state_.AddSystemLog("SYSTEM: Sin sesion activa para consultar claves.");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        pendingFingerprint_.insert(user);
+    }
+    state_.AddSystemLog("SYSTEM: Solicitando la clave publica de " + user + "...");
+    RequestPeerKey(user);
+}
+
+void ChatClient::HandleIncomingSealed(const std::string& rest, bool control) {
+    std::string from;
+    std::string payload;
+    long long ts = 0;
+    if (!SplitSenderTsPayload(rest, from, ts, payload) || !IsValidUsername(from)) return;
+
+    PendingIncomingSealed item;
+    item.control = control;
+    item.unixTs = ts;
+    if (!river::base64::DecodeToString(payload, item.envelope) || item.envelope.empty()) {
+        if (!control) state_.AddSystemLog("[PM ilegible de " + from + "]");
+        return;
+    }
+
+    std::string pub;
+    bool queued = false;
+    bool overflow = false;
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        auto it = peerKeys_.find(from);
+        if (it != peerKeys_.end()) {
+            pub = it->second;
+        } else {
+            auto& queue = pendingIncoming_[from];
+            if (queue.size() >= kMaxPendingPerPeer) overflow = true;
+            else queue.push_back(item);
+            queued = true;
+        }
+    }
+    if (overflow) {
+        state_.AddSystemLog("[PM ilegible de " + from + "]");
+        return;
+    }
+    if (queued) {
+        // Opened once the sender's KEY: reply arrives (e.g. offline PMs right after login).
+        RequestPeerKey(from);
+        return;
+    }
+    DeliverIncomingSealed(from, pub, item);
+}
+
+void ChatClient::DeliverIncomingSealed(const std::string& from,
+                                       const std::string& fromPub,
+                                       const PendingIncomingSealed& item) {
+    const std::string me = CurrentUser();
+    std::string plaintext;
+    if (me.empty() || !OpenWithIdentity("pm", from, me, fromPub, item.envelope, plaintext)) {
+        state_.AddSystemLog("[PM ilegible de " + from + "]");
+        return;
+    }
+    if (HandleAttachmentPrivateControl(from, fromPub, plaintext)) return;
+    if (item.control) return;  // [PMX] only carries attachment control
+    state_.AddIncomingPrivateMessage(from, plaintext, item.unixTs, me);
+}
+
+void ChatClient::HandleRoomLine(const std::string& rest, bool fromHistory) {
+    std::string from;
+    std::string payload;
+    long long ts = 0;
+    if (!SplitSenderTsPayload(rest, from, ts, payload)) return;
+    std::string text;
+    if (!river::base64::DecodeToString(payload, text)) text = "[mensaje ilegible]";
+    state_.AddRoomMessage(from, text, ts, fromHistory, CurrentUser());
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
 
 bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDraft& attachment) {
     if (fromUser.empty()) {
@@ -529,13 +1169,10 @@ bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDra
     const std::string kind =
         attachment.kind == AttachmentKind::Image ? "image" :
         attachment.kind == AttachmentKind::Video ? "video" : "file";
-    const std::string encOffer = river::SealPayload(
-        "@offer|" + id + "|" + kind + "|" +
-            river::base64::EncodeString(attachment.displayName) + "|" +
-            river::base64::EncodeString(attachment.mimeType) + "|" +
-            std::to_string(attachment.sizeBytes));
-
-    if (SendRawLine("[ATTACH]:" + encOffer + "\n") < 0) {
+    if (SendRawLine("[ATTACH2]:" + id + ":" + kind + ":" +
+                    river::base64::EncodeString(attachment.displayName) + ":" +
+                    river::base64::EncodeString(attachment.mimeType) + ":" +
+                    std::to_string(attachment.sizeBytes) + "\n") < 0) {
         std::lock_guard<std::mutex> lock(offeredAttachmentMutex_);
         offeredAttachments_.erase(id);
         state_.SetLastError("Could not announce the attachment.");
@@ -548,7 +1185,8 @@ bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDra
 }
 
 bool ChatClient::RequestAttachment(const AttachmentPayload& attachment, const std::string& savePath, const std::string& mode) {
-    if (attachment.ownerUser.empty() || attachment.id.empty() || savePath.empty()) {
+    if (attachment.ownerUser.empty() || !IsValidAttachmentId(attachment.id) || savePath.empty() ||
+        mode.find_first_of("|:") != std::string::npos) {
         state_.SetLastError("Solicitud de adjunto invalida.");
         return false;
     }
@@ -577,7 +1215,8 @@ bool ChatClient::RequestAttachment(const AttachmentPayload& attachment, const st
     DiscardIncomingTransfer(replaced);
     state_.UpdateAttachmentState(attachment.ownerUser, attachment.id, AttachmentTransferState::Requested);
 
-    if (!SendPrivateMessage(CurrentUser(), attachment.ownerUser, "@attachreq|" + attachment.id + "|" + mode)) {
+    // Attachment control goes as [PMX] (E2E, never queued offline by the server).
+    if (!SendSealedToUser(attachment.ownerUser, "@attachreq|" + attachment.id + "|" + mode, true)) {
         IncomingAttachmentTransfer dropped;
         {
             std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
@@ -589,36 +1228,36 @@ bool ChatClient::RequestAttachment(const AttachmentPayload& attachment, const st
         }
         DiscardIncomingTransfer(dropped);
         state_.UpdateAttachmentState(attachment.ownerUser, attachment.id, AttachmentTransferState::Available);
+        state_.SetLastError("Could not request the attachment.");
         return false;
     }
     return true;
 }
 
 bool ChatClient::HandleAttachmentBroadcast(const std::string& line) {
-    if (line.rfind("[ATTACH]:", 0) != 0) return false;
+    // ATTACH2:<fromUser>:<id>:<kind>:<nameB64>:<mimeB64>:<size>
+    if (line.rfind("ATTACH2:", 0) != 0) return false;
+    const std::vector<std::string> parts = SplitByDelimiter(line.substr(8), ':');
+    if (parts.size() != 6) return true;
 
-    const std::string rest = line.substr(9);
-    const std::size_t sep = rest.find(':');
-    if (sep == std::string::npos) return true;
-
-    const std::string sender = rest.substr(0, sep);
-    const std::string encPayload = rest.substr(sep + 1);
-    std::string payload;
-    if (!river::OpenPayload(encPayload, payload) || payload.rfind("@offer|", 0) != 0) return true;
-
-    const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
-    if (parts.size() < 6) return true;
-
+    const std::string& sender = parts[0];
     AttachmentPayload attachment;
     attachment.id = parts[1];
     attachment.ownerUser = sender;
     attachment.kind =
         parts[2] == "image" ? AttachmentKind::Image :
         parts[2] == "video" ? AttachmentKind::Video : AttachmentKind::File;
-    river::base64::DecodeToString(parts[3], attachment.displayName);
-    river::base64::DecodeToString(parts[4], attachment.mimeType);
-    attachment.sizeBytes = static_cast<std::size_t>(std::strtoull(parts[5].c_str(), nullptr, 10));
-    if (attachment.sizeBytes > kMaxAttachmentBytes || attachment.id.size() > 80 || !IsValidUsername(sender)) return true;
+    if (!river::base64::DecodeToString(parts[3], attachment.displayName) ||
+        !river::base64::DecodeToString(parts[4], attachment.mimeType)) {
+        return true;
+    }
+    long long size = 0;
+    if (!ParseUnixTs(parts[5], size)) return true;
+    attachment.sizeBytes = static_cast<std::size_t>(size);
+    if (attachment.sizeBytes > kMaxAttachmentBytes || !IsValidAttachmentId(attachment.id) ||
+        !IsValidUsername(sender) || attachment.displayName.empty()) {
+        return true;
+    }
     attachment.state = AttachmentTransferState::Available;
 
     if (sender == CurrentUser()) {
@@ -631,14 +1270,21 @@ bool ChatClient::HandleAttachmentBroadcast(const std::string& line) {
     return true;
 }
 
-void ChatClient::HandleAttachmentRequest(const std::string& requester, const std::string& attachmentId, const std::string& mode) {
+void ChatClient::HandleAttachmentRequest(const std::string& requester,
+                                         const std::string& requesterPub,
+                                         const std::string& attachmentId,
+                                         const std::string& mode) {
+    auto sendError = [&](const std::string& text) {
+        SealAndSendLine(true, requester, requesterPub,
+                        "@attacherr|" + attachmentId + "|" + river::base64::EncodeString(text));
+    };
+
     AttachmentDraft draft;
     {
         std::lock_guard<std::mutex> lock(offeredAttachmentMutex_);
         auto it = offeredAttachments_.find(attachmentId);
         if (it == offeredAttachments_.end()) {
-            SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-                river::base64::EncodeString("Attachment unavailable."));
+            sendError("Attachment unavailable.");
             return;
         }
         draft = it->second;
@@ -646,21 +1292,18 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
 
     std::ifstream input(draft.localPath, std::ios::binary);
     if (!input.is_open()) {
-        SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-            river::base64::EncodeString("Could not open the source attachment."));
+        sendError("Could not open the source attachment.");
         return;
     }
 
     if (draft.sizeBytes > kMaxAttachmentBytes) {
-        SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-            river::base64::EncodeString("Attachment exceeds the transfer limit."));
+        sendError("Attachment exceeds the transfer limit.");
         return;
     }
 
     const std::string contentSha256 = HashFileSha256(draft.localPath);
     if (contentSha256.empty()) {
-        SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-            river::base64::EncodeString("Could not hash the source attachment."));
+        sendError("Could not hash the source attachment.");
         return;
     }
     const std::string kind =
@@ -668,16 +1311,19 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
         draft.kind == AttachmentKind::Video ? "video" : "file";
     const std::size_t totalChunks = draft.sizeBytes == 0 ? 1 : (draft.sizeBytes + kAttachmentBinaryChunkBytes - 1) / kAttachmentBinaryChunkBytes;
 
-    if (!SendPrivateMessage(CurrentUser(),
-                            requester,
-                            "@attachmeta|" + attachmentId + "|" + kind + "|" +
-                                river::base64::EncodeString(draft.displayName) + "|" +
-                                river::base64::EncodeString(draft.mimeType) + "|" +
-                                std::to_string(draft.sizeBytes) + "|" + mode + "|" +
-                                std::to_string(totalChunks) + "|" + contentSha256)) {
+    if (!SealAndSendLine(true,
+                         requester,
+                         requesterPub,
+                         "@attachmeta|" + attachmentId + "|" + kind + "|" +
+                             river::base64::EncodeString(draft.displayName) + "|" +
+                             river::base64::EncodeString(draft.mimeType) + "|" +
+                             std::to_string(draft.sizeBytes) + "|" + mode + "|" +
+                             std::to_string(totalChunks) + "|" + contentSha256)) {
         return;
     }
 
+    const std::string me = CurrentUser();
+    const std::string context = "att:" + attachmentId;
     for (std::size_t index = 0; index < totalChunks; ++index) {
         if (stopRequested_.load()) return;
         std::string plainChunk;
@@ -686,21 +1332,21 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
             input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
             const std::streamsize got = input.gcount();
             if (got <= 0) {
-                SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-                    river::base64::EncodeString("Transferencia interrumpida."));
+                sendError("Transferencia interrumpida.");
                 return;
             }
             plainChunk.assign(buffer.data(), static_cast<std::size_t>(got));
         }
-        const std::string encryptedChunk = river::SealPayloadBinary(plainChunk);
-        if (encryptedChunk.empty() ||
+        // Each chunk is its own E2E envelope, sealed owner -> requester.
+        std::string encryptedChunk;
+        if (me.empty() ||
+            !SealWithIdentity(context, me, requester, requesterPub, plainChunk, encryptedChunk) ||
             !SendAttachmentChunkFrame(requester,
                                       attachmentId,
                                       static_cast<int>(index),
                                       static_cast<int>(totalChunks),
                                       encryptedChunk)) {
-            SendPrivateMessage(CurrentUser(), requester, "@attacherr|" + attachmentId + "|" +
-                river::base64::EncodeString("Transferencia interrumpida."));
+            sendError("Transferencia interrumpida.");
             return;
         }
     }
@@ -741,16 +1387,19 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
     state_.ClearLastError();
 }
 
-bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const std::string& payload) {
+bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender,
+                                                const std::string& senderPub,
+                                                const std::string& payload) {
     if (payload.rfind("@attachreq|", 0) == 0) {
         const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
-        if (parts.size() >= 3) StartAttachmentUpload(sender, parts[1], parts[2]);
+        if (parts.size() >= 3 && IsValidAttachmentId(parts[1]) && parts[2].find(':') == std::string::npos)
+            StartAttachmentUpload(sender, senderPub, parts[1], parts[2]);
         return true;
     }
 
     if (payload.rfind("@attachmeta|", 0) == 0) {
         const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
-        if (parts.size() < 8) return true;
+        if (parts.size() < 8 || !IsValidAttachmentId(parts[1])) return true;
 
         const std::string key = sender + "|" + parts[1];
         IncomingAttachmentTransfer dropped;
@@ -762,6 +1411,7 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
             IncomingAttachmentTransfer& transfer = pending->second;
             if (transfer.partFile) return true;  // duplicate metadata for a transfer already in flight
             transfer.ownerUser = sender;
+            transfer.ownerPub = senderPub;
             transfer.attachment.id = parts[1];
             transfer.attachment.ownerUser = sender;
             transfer.attachment.kind =
@@ -863,14 +1513,26 @@ bool ChatClient::HandleAttachmentChunkFrame(const std::string& payload) {
         totalChunks == 0 ||
         totalChunks > (kMaxAttachmentBytes + kAttachmentBinaryChunkBytes - 1) / kAttachmentBinaryChunkBytes ||
         index >= totalChunks ||
-        offset >= payload.size()) {
+        offset >= payload.size() ||
+        !IsValidAttachmentId(attachmentId)) {
         return true;
     }
 
     const std::string key = sender + "|" + attachmentId;
+    std::string ownerPub;
+    {
+        std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
+        auto it = incomingAttachments_.find(key);
+        if (it == incomingAttachments_.end() || !it->second.partFile) return true;
+        ownerPub = it->second.ownerPub;
+    }
+
+    // Chunk envelopes are sealed owner -> requester with context "att:<id>".
     std::string plainChunk;
-    const std::string encryptedChunk = payload.substr(offset);
-    const bool opened = river::OpenPayloadBinary(encryptedChunk, plainChunk) &&
+    const std::string me = CurrentUser();
+    const bool opened = !ownerPub.empty() && !me.empty() &&
+                        OpenWithIdentity("att:" + attachmentId, sender, me, ownerPub,
+                                         payload.substr(offset), plainChunk) &&
                         plainChunk.size() <= kAttachmentBinaryChunkBytes;
 
     IncomingAttachmentTransfer finished;
@@ -918,6 +1580,10 @@ bool ChatClient::HandleAttachmentChunkFrame(const std::string& payload) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Receive loop
+// ---------------------------------------------------------------------------
+
 void ChatClient::ReceiveLoop(SocketHandle sock) {
     AppendClientLog("ReceiveLoop start");
     while (!stopRequested_.load()) {
@@ -943,14 +1609,51 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             SendRawLine("PONG\n");
         } else if (line == "PONG") {
             HandleServerPong();
-        } else if (line.rfind("AUTH_CHALLENGE:", 0) == 0) {
-            AppendClientLog("ReceiveLoop line=AUTH_CHALLENGE");
-            if (!SendChallengeLogin(line)) {
-                state_.SetAuthActionPending(false);
-                state_.SetLastError("Could not complete authentication challenge.");
+        } else if (line.rfind("MSG:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=MSG");
+            HandleRoomLine(line.substr(4), false);
+        } else if (line.rfind("HIST:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=HIST");
+            HandleRoomLine(line.substr(5), true);
+        } else if (line.rfind("HISTORY_BEGIN:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=HISTORY_BEGIN");
+            inHistory_ = true;
+        } else if (line == "HISTORY_END") {
+            AppendClientLog("ReceiveLoop line=HISTORY_END");
+            inHistory_ = false;
+        } else if (line.rfind("PM2:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=PM2");
+            HandleIncomingSealed(line.substr(4), false);
+        } else if (line.rfind("PMX:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=PMX");
+            HandleIncomingSealed(line.substr(4), true);
+        } else if (line.rfind("KEY:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=KEY");
+            HandleKeyReply(line.substr(4));
+        } else if (line.rfind("KEY_CHANGED:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=KEY_CHANGED");
+            HandleKeyChanged(line.substr(12));
+        } else if (line.rfind("ATTACH2:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=ATTACH2");
+            HandleAttachmentBroadcast(line);
+        } else if (line.rfind("AUTH_CHALLENGE2:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=AUTH_CHALLENGE2");
+            if (!SendAuthProof(line)) {
+                FailAuthFatal("No se pudo completar el reto de autenticacion.");
+                break;
+            }
+        } else if (line.rfind("AUTH_OK:", 0) == 0) {
+            AppendClientLog("ReceiveLoop line=AUTH_OK");
+            if (!VerifyAuthOk(line)) {
+                FailAuthFatal("Firma del servidor invalida: autenticacion mutua fallida. Conexion cerrada.");
+                break;
             }
         } else if (IsSystemNotice(line, "FIRST LOGIN")) {
             AppendClientLog("ReceiveLoop line=FIRST LOGIN");
+            if (!authVerified_.load()) {
+                FailAuthFatal("El servidor no verifico su identidad (falta AUTH_OK valido). Conexion cerrada.");
+                break;
+            }
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
             state_.SetMustChangeCredentials(true);
@@ -959,16 +1662,30 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.ClearLastError();
         } else if (IsSystemNotice(line, "ACCESO CONCEDIDO")) {
             AppendClientLog("ReceiveLoop line=ACCESO CONCEDIDO");
-            RememberSessionCredentials();
-            {
-                // After a first-login change the server knows us by the new identity.
-                std::string queuedUser;
-                {
-                    std::lock_guard<std::mutex> lock(reloginMutex_);
-                    queuedUser = queuedLoginUser_;
-                }
-                if (!queuedUser.empty()) SetCurrentUser(queuedUser);
+            if (!authVerified_.load()) {
+                FailAuthFatal("El servidor no verifico su identidad (falta AUTH_OK valido). Conexion cerrada.");
+                break;
             }
+            // Credentials the identity file is protected with (new ones after a
+            // first-login change, plus the old ones to migrate the existing file).
+            std::string loginUser;
+            std::string loginPass;
+            std::string oldUser;
+            std::string oldPass;
+            {
+                std::lock_guard<std::mutex> lock(reloginMutex_);
+                if (!queuedLoginUser_.empty() && !queuedLoginPass_.empty()) {
+                    loginUser = queuedLoginUser_;
+                    loginPass = queuedLoginPass_;
+                    oldUser = pendingLoginUser_;
+                    oldPass = pendingLoginPass_;
+                } else {
+                    loginUser = pendingLoginUser_;
+                    loginPass = pendingLoginPass_;
+                }
+            }
+            RememberSessionCredentials();
+            if (!loginUser.empty()) SetCurrentUser(loginUser);
             QueueAutoLogin("", "");
             state_.SetAuthenticated(true);
             state_.SetMustChangeCredentials(false);
@@ -977,12 +1694,29 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetConnectionState(ConnState::AUTHENTICATED);
             state_.SetStatusDetail("Canal seguro autenticado.");
             state_.ClearLastError();
+            if (LoadOrCreateIdentity(loginUser, loginPass, oldUser, oldPass)) {
+                PublishIdentityKey();
+            } else {
+                state_.SetLastError("No se pudo preparar la clave de identidad: los mensajes privados no estaran disponibles.");
+            }
+            WipeString(loginPass);
+            WipeString(oldPass);
         } else if (line.rfind("SESSION:", 0) == 0) {
             AppendClientLog("ReceiveLoop line=SESSION");
             state_.SetStatusDetail("Sesion segura activa.");
         } else if (IsSystemNotice(line, "UPLINK ESTABLISHED")) {
             AppendClientLog("ReceiveLoop line=UPLINK ESTABLISHED");
             state_.SetConnectionState(ConnState::TOR_READY);
+            if (!BannerHasProto2(line)) {
+                AppendClientLog("ReceiveLoop incompatible protocol");
+                bannerState_.store(2);
+                state_.SetAuthActionPending(false);
+                state_.SetStatusDetail("Servidor incompatible.");
+                state_.SetLastError(kIncompatibleServerError);
+                state_.AddSystemLog(std::string("SYSTEM: ") + kIncompatibleServerError);
+                continue;
+            }
+            bannerState_.store(1);
             state_.SetStatusDetail("Canal Tor establecido. Esperando login.");
             state_.ClearLastError();
             {
@@ -1003,6 +1737,13 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
                 state_.AddSystemLog("SYSTEM: Enlace restablecido. Reautenticando como " + queuedUser + "...");
                 SendLogin(queuedUser, queuedPass);
             }
+            WipeString(queuedPass);
+        } else if (IsSystemNotice(line, "CLIENTE OBSOLETO")) {
+            AppendClientLog("ReceiveLoop line=CLIENTE OBSOLETO");
+            // The server closes the link; do not keep re-sending credentials to it.
+            state_.AddSystemLog(line);
+            FailAuthFatal("El servidor rechazo este cliente como obsoleto (protocolo 2).");
+            break;
         } else if (IsSystemNotice(line, "ACTUALIZADO. RECONECTA")) {
             AppendClientLog("ReceiveLoop line=ACTUALIZADO");
             state_.SetMustChangeCredentials(false);
@@ -1021,6 +1762,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         } else if (IsSystemNotice(line, "CREDENCIALES INCORRECTAS")) {
             AppendClientLog("ReceiveLoop line=CREDENCIALES INCORRECTAS");
             ForgetSessionCredentials();
+            ResetAuthExchange();
             state_.SetAuthActionPending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
             state_.SetStatusDetail("Canal Tor listo. Esperando nuevas credenciales.");
@@ -1029,6 +1771,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         } else if (IsSystemNotice(line, "HWID NO RECONOCIDO")) {
             AppendClientLog("ReceiveLoop line=HWID NO RECONOCIDO");
             ForgetSessionCredentials();
+            ResetAuthExchange();
             state_.SetAuthActionPending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
             state_.SetStatusDetail("Canal Tor listo. Acceso denegado por HWID.");
@@ -1037,6 +1780,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         } else if (IsSystemNotice(line, "ACCESO BLOQUEADO")) {
             AppendClientLog("ReceiveLoop line=ACCESO BLOQUEADO");
             ForgetSessionCredentials();
+            ResetAuthExchange();
             if (state_.IsAuthenticated()) {
                 std::lock_guard<std::mutex> lock(reloginMutex_);
                 disconnectNotice_ = line.substr(8);
@@ -1065,24 +1809,13 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetStatusDetail("Could not complete the initial update.");
             state_.SetLastError("Could not update the user or key.");
             state_.AddSystemLog("SYSTEM: ERROR ACTUALIZANDO USUARIO.");
-        } else if (line.rfind("[ATTACH]:", 0) == 0) {
-            AppendClientLog("ReceiveLoop line=ATTACH_OFFER");
-            HandleAttachmentBroadcast(line);
-        } else if (line.rfind("[PM]:", 0) == 0) {
-            AppendClientLog("ReceiveLoop line=PM");
-            const std::string rest = line.substr(5);
-            const std::size_t sep = rest.find(':');
-            if (sep != std::string::npos) {
-                const std::string sender = rest.substr(0, sep);
-                const std::string encPayload = rest.substr(sep + 1);
-                std::string dec;
-                if (river::OpenPayload(encPayload, dec) && HandleAttachmentPrivateControl(sender, dec))
-                    continue;
-            }
-            state_.AddIncomingWireMessage(rest, CurrentUser(), true);
+        } else if (IsSystemNotice(line, "CLAVE PUBLICA RECHAZADA")) {
+            AppendClientLog("ReceiveLoop line=KEY REJECTED");
+            state_.SetLastError("El servidor rechazo la clave publica.");
+            state_.AddSystemLog(line);
         } else {
             AppendClientLog("ReceiveLoop line=UNHANDLED");
-            state_.AddIncomingWireMessage(line, CurrentUser(), false);
+            state_.AddIncomingWireMessage(line);
         }
     }
     AppendClientLog("ReceiveLoop end");
@@ -1096,8 +1829,8 @@ void ChatClient::NetworkLoop() {
         if (!river::HasRequiredClientConfig()) {
             state_.SetConnectionState(ConnState::DISCONNECTED);
             state_.SetAuthenticated(false);
-            state_.SetStatusDetail("Configura THE_RIVER_ONION y THE_RIVER_AES_KEY antes de conectar.");
-            state_.SetLastError("Local private configuration is missing. Embedded build keys will not be used.");
+            state_.SetStatusDetail("Configura THE_RIVER_ONION antes de conectar.");
+            state_.SetLastError("Falta la configuracion local: THE_RIVER_ONION (direccion .onion del servidor).");
             AppendClientLog("NetworkLoop missing private config");
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
@@ -1137,6 +1870,9 @@ void ChatClient::NetworkLoop() {
             continue;
         }
 
+        bannerState_.store(0);
+        inHistory_ = false;
+        ResetAuthExchange();
         {
             std::lock_guard<std::mutex> lock(socketMutex_);
             socket_ = sock;
@@ -1148,6 +1884,10 @@ void ChatClient::NetworkLoop() {
         ReceiveLoop(sock);
         CloseCurrentSocket();
         FailPendingIncomingAttachments("Enlace perdido durante la transferencia del adjunto.");
+        // Identity keys live only while logged in; the next login reloads them.
+        ClearE2EState(true);
+        ResetAuthExchange();
+        bannerState_.store(0);
         state_.SetAuthenticated(false);
         state_.SetConnectionState(ConnState::DISCONNECTED);
         state_.SetAuthActionPending(false);
