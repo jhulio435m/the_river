@@ -233,6 +233,26 @@ tr:last-child td { border-bottom: 0; }
 @media (max-width: 640px) { .term-users-compact { display: block; } }
 .term-users-compact .tag { background: var(--blue); color: var(--white); padding: 0 6px; margin-right: 6px; border: 1px solid var(--white); }
 
+/* Hero mock is an illustration: say so right under it. */
+.hero-visual { min-width: 0; }
+.hero-visual .term { margin: 0; }
+.mock-label { font-size: 13px; color: var(--gray); margin: 8px 0 0; max-width: none; }
+.mock-label .tag { background: var(--yellow); color: var(--black); font-weight: bold; padding: 0 6px; margin-right: 6px; }
+
+/* ---------- Real demo clips (site/media, recorded by scripts/demo) ---------- */
+.clips { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); margin-top: 18px; }
+@media (min-width: 900px) {
+  .clips { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clip.wide { grid-column: 1 / -1; }
+}
+.clip { margin: 0; border: 2px solid var(--white); background: var(--black); min-width: 0; }
+.clip video { display: block; width: 100%; height: auto; background: var(--black); border-bottom: 1px solid var(--white); }
+.clip figcaption { padding: 10px 12px; font-size: 14px; color: var(--white); }
+.clip figcaption kbd { font-size: 12px; }
+.rec { display: inline-block; background: var(--red); color: var(--white); font-weight: bold; padding: 0 6px; margin-right: 6px; font-size: 12px; }
+.rec::before { content: "\25CF "; }
+.clip-single { max-width: 100%; margin: 0 0 16px; }
+
 /* Feature list */
 .features { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); max-width: none; }

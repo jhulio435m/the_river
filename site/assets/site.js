@@ -1,4 +1,5 @@
-/* The River site: language toggle (ES/EN), hero terminal animation, footer clock.
+/* The River site: language toggle (ES/EN), hero terminal animation, footer clock,
+   demo videos that play only while visible (never with reduced motion).
    No network calls, no tracking. Everything degrades to static Spanish content. */
 (function () {
   "use strict";
@@ -87,6 +88,42 @@
     run();
   }
 
+
+  // Real demo recordings (video[data-demo]): muted loops that play only while
+  // on screen. With prefers-reduced-motion (or no IntersectionObserver) they
+  // never autoplay: the poster stays and the native controls start them.
+  function initDemoVideos() {
+    var vids = document.querySelectorAll("video[data-demo]");
+    if (!vids.length) return;
+    var i;
+    for (i = 0; i < vids.length; i++) vids[i].controls = true;
+    if (reduceMotion || !("IntersectionObserver" in window)) return;
+    var io = new IntersectionObserver(function (entries) {
+      for (var j = 0; j < entries.length; j++) {
+        var v = entries[j].target;
+        if (entries[j].isIntersecting && entries[j].intersectionRatio >= 0.5) {
+          if (v.dataset.userPaused === "1") continue;
+          var p = v.play();
+          if (p && p.catch) p.catch(function () { /* autoplay refused: poster + controls remain */ });
+        } else if (!v.paused) {
+          v.dataset.autoPause = "1";
+          v.pause();
+        }
+      }
+    }, { threshold: [0, 0.5] });
+    for (i = 0; i < vids.length; i++) {
+      (function (v) {
+        // Respect a pause the user makes with the controls; resume autoplay once they press play.
+        v.addEventListener("pause", function () {
+          if (v.dataset.autoPause === "1") { v.dataset.autoPause = ""; return; }
+          v.dataset.userPaused = "1";
+        });
+        v.addEventListener("play", function () { v.dataset.userPaused = ""; });
+        io.observe(v);
+      })(vids[i]);
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     applyLang(root.lang);
     var btns = document.querySelectorAll("[data-lang-toggle]");
@@ -100,5 +137,6 @@
     tickClocks();
     window.setInterval(tickClocks, 1000);
     initTerminal();
+    initDemoVideos();
   });
 })();

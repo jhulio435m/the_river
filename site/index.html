@@ -47,7 +47,8 @@
         <p class="muted" lang="en">A private-community project: an administrator must give you the <code>.onion</code> address and an account.</p>
       </div>
 
-      <figure class="term" data-term role="img" aria-label="Captura simulada del cliente: barra azul con usuarios activos, conversación en verde y magenta y el compositor user-->. / Simulated client screen: blue bar with active users, chat in lime and magenta, and the user--> composer." style="margin:0">
+      <div class="hero-visual">
+      <figure class="term" data-term role="img" aria-label="Ilustración animada del cliente (no es una grabación): barra azul con usuarios activos, conversación en verde y magenta y el compositor user-->. / Animated illustration of the client (not a recording): blue bar with active users, chat in lime and magenta, and the user--> composer.">
         <div class="term-title" aria-hidden="true"><b>~= the river &lt;3&gt;</b>  [SECURE]  [Nodes: 3]</div>
         <div class="term-head" aria-hidden="true">
           <span><span lang="es">Usuarios activos 3 &lt;ENLACE SEGURO&gt;</span><span lang="en">Active Users 3 &lt;SECURE UPLINK&gt;</span></span>
@@ -75,6 +76,66 @@
         </div>
         <div class="term-foot" data-clock aria-hidden="true"><span class="ye">Sun Nov 22</span><span class="cy"> 00:00:00</span></div>
       </figure>
+      <p class="mock-label"><span class="tag" lang="es">ILUSTRACIÓN</span><span class="tag" lang="en">ILLUSTRATION</span>
+        <span lang="es">Animación hecha en HTML para dar una idea del aspecto. Las <a href="#demo">grabaciones reales</a> están más abajo.</span>
+        <span lang="en">An HTML animation to give an idea of the look. The <a href="#demo">real recordings</a> are below.</span></p>
+      </div>
+    </section>
+
+    <section id="demo" aria-labelledby="demo-title">
+      <h2 id="demo-title"><span lang="es">Demo real</span><span lang="en">Real demo</span></h2>
+      <p lang="es">Estos vídeos son <strong>grabaciones de pantalla reales</strong> de los binarios de The River funcionando: <code>the_river_server</code>, la consola <code>the_river_admin</code> y dos clientes gráficos (alice y bob) en la misma máquina Linux. No hay montajes ni maquetas: solo se recortó la zona de las ventanas y se comprimió el vídeo.</p>
+      <p lang="en">These videos are <strong>real screen recordings</strong> of The River binaries running: <code>the_river_server</code>, the <code>the_river_admin</code> console and two GUI clients (alice and bob) on the same Linux machine. No mock-ups or edited composites: the capture was only cropped to the windows and compressed.</p>
+      <p class="muted" lang="es">Cómo se grabó: en una pantalla virtual (Xvfb) con las pulsaciones automatizadas con xdotool, a velocidad de tecleo humana. Para poder grabar sin red, Tor se sustituye por un proxy SOCKS5 local que entrega la conexión al servidor local (con 2 s de espera simulando el circuito); el protocolo, el login SCRAM y el cifrado de extremo a extremo son los de siempre. Cuentas y claves de demostración. Los scripts para reproducirlo están en <code>the_river_cpp/scripts/demo/</code>.</p>
+      <p class="muted" lang="en">How it was recorded: on a virtual display (Xvfb) with keystrokes automated by xdotool at human typing speed. To record offline, Tor is replaced by a local SOCKS5 proxy that hands the connection to the local server (with a 2 s delay standing in for the circuit); the protocol, SCRAM login and end-to-end encryption are the real ones. Demo accounts and keys only. The scripts that reproduce it live in <code>the_river_cpp/scripts/demo/</code>.</p>
+
+      <div class="clips">
+        <figure class="clip">
+          <video data-demo muted loop playsinline preload="metadata" width="960" height="620" poster="media/login.jpg" aria-describedby="cap-login">
+            <source src="media/login.mp4" type="video/mp4">
+            <source src="media/login.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-login"><span class="rec">REC 0:26</span>
+            <span lang="es"><strong>Primer acceso.</strong> El cliente arranca (NEGOCIANDO TOR → TOR LISTO), se pasa la interfaz a español con el botón ES, alice entra con el ID y la clave de un solo uso que le dio el admin y el cliente la obliga a elegir nuevo ID y clave antes de entrar al chat. Al entrar genera su clave de identidad y publica la pública.</span>
+            <span lang="en"><strong>First access.</strong> The client starts (NEGOCIANDO TOR → TOR LISTO), the UI is switched to Spanish with the ES button, alice signs in with the ID and one-time key the admin gave her, and the client makes her pick a new ID and key before entering the chat. On entry it generates her identity key and publishes the public half.</span></figcaption>
+        </figure>
+        <figure class="clip">
+          <video data-demo muted loop playsinline preload="metadata" width="1012" height="536" poster="media/admin.jpg" aria-describedby="cap-admin">
+            <source src="media/admin.mp4" type="video/mp4">
+            <source src="media/admin.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-admin"><span class="rec">REC 0:21</span>
+            <span lang="es"><strong>Consola de administración.</strong> <code>the_river_admin</code> entra por el mismo proxy SOCKS5 (la clave no se muestra al teclear), crea la cuenta de alice con <code>/newuser</code> —el servidor genera una clave inicial aleatoria de un solo uso— y lista las cuentas con <code>/accounts</code>.</span>
+            <span lang="en"><strong>Admin console.</strong> <code>the_river_admin</code> connects through the same SOCKS5 proxy (the key is not echoed), creates alice's account with <code>/newuser</code> —the server generates a random one-time initial key— and lists accounts with <code>/accounts</code>.</span></figcaption>
+        </figure>
+        <figure class="clip wide">
+          <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/chat.jpg" aria-describedby="cap-chat">
+            <source src="media/chat.mp4" type="video/mp4">
+            <source src="media/chat.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-chat"><span class="rec">REC 0:20</span>
+            <span lang="es"><strong>Sala.</strong> alice (izquierda) y bob (derecha) conversan en la sala. alice completa el nombre de bob con <kbd>Tab</kbd> y luego recupera su último mensaje con <kbd>↑</kbd> para corregir la hora antes de reenviarlo.</span>
+            <span lang="en"><strong>Room.</strong> alice (left) and bob (right) chat in the room. alice completes bob's name with <kbd>Tab</kbd>, then recalls her last message with <kbd>↑</kbd> to fix the time before sending it again.</span></figcaption>
+        </figure>
+        <figure class="clip wide">
+          <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/private.jpg" aria-describedby="cap-private">
+            <source src="media/private.mp4" type="video/mp4">
+            <source src="media/private.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-private"><span class="rec">REC 0:16</span>
+            <span lang="es"><strong>Privados cifrados de extremo a extremo.</strong> alice pide la huella de bob con <code>/fingerprint bob</code> y bob muestra la suya con <code>/fingerprint</code>: coinciden. Después alice escribe <code>/msg bob …</code> y bob contesta con <code>/r …</code>; las líneas <code>[PM]</code> viajan selladas con X25519 + AES-256-GCM y el servidor no puede leerlas.</span>
+            <span lang="en"><strong>End-to-end encrypted private messages.</strong> alice asks for bob's fingerprint with <code>/fingerprint bob</code> and bob shows his own with <code>/fingerprint</code>: they match. Then alice sends <code>/msg bob …</code> and bob replies with <code>/r …</code>; the <code>[PM]</code> lines travel sealed with X25519 + AES-256-GCM and the server cannot read them.</span></figcaption>
+        </figure>
+        <figure class="clip wide">
+          <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/attachment.jpg" aria-describedby="cap-attachment">
+            <source src="media/attachment.mp4" type="video/mp4">
+            <source src="media/attachment.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-attachment"><span class="rec">REC 0:24</span>
+            <span lang="es"><strong>Adjuntos.</strong> alice pulsa «Adjuntar», pega la ruta de <code>rio.png</code> en el selector de archivos del sistema (zenity) y la oferta <code>[IMG]</code> aparece en la sala. bob hace doble clic, pulsa «Previsualizar» y la imagen llega cifrada de extremo a extremo y se muestra en el cliente. Tal cual se grabó: al abrirse el selector, el enlace de alice se cae y el cliente lo restablece solo («alice salió / alice se unió», con la reposición del historial).</span>
+            <span lang="en"><strong>Attachments.</strong> alice clicks “Adjuntar” (Attach), pastes the path of <code>rio.png</code> into the system file picker (zenity) and the <code>[IMG]</code> offer shows up in the room. bob double-clicks it, presses “Previsualizar” (Preview) and the image arrives end-to-end encrypted and is shown in the client. Exactly as recorded: when the picker opens, alice's link drops and the client re-establishes it by itself (“alice salió / alice se unió”, with the history replay).</span></figcaption>
+        </figure>
+      </div>
     </section>
 
     <section aria-labelledby="feat-title">
