@@ -28,7 +28,7 @@ IMGUI_SRC="imgui_src/imgui.cpp imgui_src/imgui_draw.cpp imgui_src/imgui_tables.c
 CLIENT_SRC="$CLIENT_PLATFORM_SRC src/client/app_ui.cpp src/client/chat_state.cpp src/client/chat_client.cpp src/client/command_processor.cpp src/client/ui_sections.cpp src/client/attachment_utils.cpp src/client/image_preview_win32.cpp $RUNTIME_SRC"
 
 # En Windows/MinGW solemos vincular estaticamente para portabilidad
-LIBS="-lglfw3 -lgdi32 -lopengl32 -limm32 -lcomdlg32 -lole32 -lssl -lcrypto -lws2_32 -lurlmon -lcrypt32 -ldwmapi -lgdiplus -lpthread"
+LIBS="-lglfw3 -lgdi32 -lopengl32 -limm32 -lcomdlg32 -lole32 -lssl -lcrypto -lbcrypt -lws2_32 -lurlmon -lcrypt32 -ldwmapi -lgdiplus -lpthread"
 INCLUDES="-I./include -I. -I./imgui_src -I./imgui_src/backends"
 
 if [ ! -f sqlite3_win.o ]; then
