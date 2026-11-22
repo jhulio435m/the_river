@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="es" data-title-es="Descargar — The River" data-title-en="Download — The River">
+<html lang="es" data-title-es="Versiones — The River" data-title-en="Versions — The River">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Descargar — The River</title>
-  <meta name="description" content="Descarga el cliente de The River para Windows, Linux y Termux, y configúralo con THE_RIVER_ONION.">
+  <title>Versiones — The River</title>
+  <meta name="description" content="Consulta las versiones publicadas de The River y su compatibilidad con el prototipo del protocolo 2.">
   <meta name="theme-color" content="#0000a8">
   <meta name="referrer" content="no-referrer">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
@@ -19,7 +19,7 @@
       <nav aria-label="Principal / Main">
         <ul class="nav">
           <li><a href="index.html"><span lang="es">Inicio</span><span lang="en">Home</span></a></li>
-          <li><a href="download.html" aria-current="page"><span lang="es">Descargar</span><span lang="en">Download</span></a></li>
+          <li><a href="download.html" aria-current="page"><span lang="es">Versiones</span><span lang="en">Versions</span></a></li>
           <li><a href="security.html"><span lang="es">Seguridad</span><span lang="en">Security</span></a></li>
           <li><a href="guide.html"><span lang="es">Guía</span><span lang="en">Guide</span></a></li>
         </ul>
@@ -29,13 +29,13 @@
   </header>
   <main id="main">
 
-    <h1><span lang="es">Descargar The River</span><span lang="en">Download The River</span></h1>
-    <p class="lead" lang="es">Los binarios oficiales se publican en las <a href="https://github.com/jhulio435m/the_river/releases/latest">Releases de GitHub</a>. Cada zip trae el cliente gráfico y el Tor Expert Bundle que necesita.</p>
-    <p class="lead" lang="en">Official binaries are published on <a href="https://github.com/jhulio435m/the_river/releases/latest">GitHub Releases</a>. Each zip contains the graphical client plus the Tor Expert Bundle it needs.</p>
+    <h1><span lang="es">Versiones y descargas</span><span lang="en">Versions and downloads</span></h1>
+    <p class="lead" lang="es">El código y las versiones publicadas están en <a href="https://github.com/jhulio435m/the_river">GitHub</a>. Los enlaces de esta página apuntan siempre al último release publicado; cada zip contiene el cliente gráfico y Tor.</p>
+    <p class="lead" lang="en">The source code and published versions are on <a href="https://github.com/jhulio435m/the_river">GitHub</a>. The links on this page always point to the latest published release; each zip contains the graphical client and Tor.</p>
 
-    <div class="note warn"><p class="tag" lang="es">Protocolo 2</p><p class="tag" lang="en">Protocol 2</p>
-      <p lang="es">El servidor actual habla el protocolo 2. Los clientes antiguos (protocolo 1) son rechazados con <code>CLIENTE OBSOLETO</code>: descarga siempre la última versión. El cliente <strong>solo</strong> necesita <code>THE_RIVER_ONION</code>. Si tu <code>runtime.env</code> viejo tiene una línea <code>THE_RIVER_AES_KEY</code>, bórrala: esa clave es exclusiva del servidor y nadie debería pedírtela.</p>
-      <p lang="en">The current server speaks protocol 2. Old clients (protocol 1) are rejected with <code>CLIENTE OBSOLETO</code>: always download the latest release. The client <strong>only</strong> needs <code>THE_RIVER_ONION</code>. If your old <code>runtime.env</code> has a <code>THE_RIVER_AES_KEY</code> line, delete it: that key is server-only and nobody should ask you for it.</p>
+    <div class="note warn"><p class="tag" lang="es">Antes de probarlo</p><p class="tag" lang="en">Before trying it</p>
+      <p lang="es">Los vídeos de la portada muestran el prototipo del protocolo 2. El último release publicado puede ser anterior y no incluir esas funciones. Comprueba la versión en <a href="https://github.com/jhulio435m/the_river/releases/latest">GitHub Releases</a> y usa un cliente del mismo protocolo que el servidor. Las instrucciones de esta página corresponden al protocolo 2.</p>
+      <p lang="en">The homepage videos show the protocol 2 prototype. The latest published release may be older and lack those features. Check its version on <a href="https://github.com/jhulio435m/the_river/releases/latest">GitHub Releases</a> and use a client with the same protocol as the server. The instructions on this page are for protocol 2.</p>
     </div>
 
     <ul class="toc">

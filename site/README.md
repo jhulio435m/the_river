@@ -72,6 +72,14 @@ Keep each clip short (10–30 s) and the folder small (currently ~2.4 MB).
 
 ## Deployment
 
+### Release links
+
+The download buttons use GitHub's `/releases/latest/download/<asset>` URLs.
+They follow the newest published release automatically when it contains assets
+with the same filenames. Creating a release does not change the site's HTML or
+redeploy GitHub Pages. The current site describes the protocol 2 prototype, so
+keep the compatibility note visible until that protocol has a published release.
+
 ### Cloudflare Pages
 
 ```bash
