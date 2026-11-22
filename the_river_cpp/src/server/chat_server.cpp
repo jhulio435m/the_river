@@ -315,8 +315,8 @@ void AppendSizedString(std::string& out, const std::string& value) {
 }
 
 ChatServer::ChatServer(const std::string& dbPath, const std::string& logPath)
-    : dbPath_(dbPath), logPath_(logPath) {
-    fakeSaltSecret_ = river::scram::RandomNonceHex(32);
+    : dbPath_(dbPath), logPath_(logPath),
+      fakeSaltSecret_(river::scram::RandomNonceHex(32)) {
     if (fakeSaltSecret_.empty()) fakeSaltSecret_ = RandomHex(32);
 }
 
@@ -1749,7 +1749,8 @@ int ChatServer::Run() {
     addr.sin_port = htons(static_cast<std::uint16_t>(listenPort));
 
     int opt = 1;
-    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&opt), sizeof(opt));
     if (bind(serverSocket, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
         std::cerr << "[NET] No se pudo hacer bind en " << bindAddress << ":" << listenPort << std::endl;
         return 1;

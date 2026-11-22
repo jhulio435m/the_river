@@ -108,7 +108,7 @@ void HandleNicknameCompletion(ImGuiInputTextCallbackData* data, const ClientUiSt
             }
             common = i;
         }
-        completion = completion.substr(0, common);
+        completion.resize(common);
         if (completion.size() <= prefix.size()) return;
     } else {
         completion += (wordStart == 0) ? ": " : " ";
