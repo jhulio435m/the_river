@@ -18,6 +18,8 @@ target_compile_options(sqlite3_obj PRIVATE -O2)
 
 add_library(river_common STATIC
     src/common/base64.cpp
+    src/common/e2e_crypto.cpp
+    src/common/scram.cpp
     src/common/secure_envelope.cpp
     src/common/security_utils.cpp
     src/common/shared_config.cpp
@@ -121,6 +123,12 @@ add_executable(river_unit_tests
 )
 target_link_libraries(river_unit_tests PRIVATE river_common)
 add_test(NAME river_unit_tests COMMAND river_unit_tests)
+
+add_executable(river_crypto_tests
+    tests/crypto_tests.cpp
+)
+target_link_libraries(river_crypto_tests PRIVATE river_common)
+add_test(NAME river_crypto_tests COMMAND river_crypto_tests)
 
 add_executable(river_integration_tests
     tests/integration_tests.cpp

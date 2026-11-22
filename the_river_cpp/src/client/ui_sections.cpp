@@ -13,6 +13,7 @@
 #include "client/attachment_utils.h"
 #include "client/chat_client.h"
 #include "client/chat_state.h"
+#include "client/client_settings.h"
 #include "client/command_processor.h"
 #include "client/file_picker.h"
 #include "client/image_preview.h"
@@ -659,6 +660,7 @@ void RenderHeaderBar(ChatState& state, ClientUiState& uiState, float width, cons
     ImGui::SetCursorPos(ImVec2(width - langButtonWidth - 10.0f, 6.0f));
     if (ImGui::Button(uiState.spanishUi ? "EN" : "ES", ImVec2(langButtonWidth, 24.0f))) {
         uiState.spanishUi = !uiState.spanishUi;
+        client_settings::SaveClientSettings(uiState);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s",

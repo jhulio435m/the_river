@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -27,7 +29,19 @@ namespace {
 std::mutex gClientLogMutex;
 std::atomic<unsigned long long> gAttachmentCounter{0};
 
+// Diagnostics only: off unless THE_RIVER_CLIENT_LOG=1. Callers must log structural
+// events (connection state, frame sizes, line kinds) and never message contents,
+// credentials, usernames, session ids or attachment names/paths.
+bool ClientLogEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("THE_RIVER_CLIENT_LOG");
+        return value != nullptr && std::string(value) == "1";
+    }();
+    return enabled;
+}
+
 void AppendClientLog(const std::string& line) {
+    if (!ClientLogEnabled()) return;
     std::lock_guard<std::mutex> lock(gClientLogMutex);
     std::ofstream out("client_runtime.log", std::ios::app);
     if (!out.is_open()) return;
@@ -46,11 +60,6 @@ std::vector<std::string> SplitByDelimiter(const std::string& value, char delimit
     std::string part;
     while (std::getline(ss, part, delimiter)) parts.push_back(part);
     return parts;
-}
-
-std::string BytesToString(const std::vector<unsigned char>& bytes) {
-    if (bytes.empty()) return "";
-    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
 std::string BytesToHex(const unsigned char* data, std::size_t size) {
@@ -139,6 +148,91 @@ bool IsSystemNotice(const std::string& line, const char* token) {
 }
 
 }  // namespace
+
+namespace attachment_part {
+
+std::string PartPathFor(const std::string& targetPath) {
+    return targetPath + ".part";
+}
+
+std::shared_ptr<std::fstream> CreatePartFile(const std::string& partPath) {
+    {
+        // Create/truncate first: an in|out fstream will not create a missing file.
+        std::ofstream create(partPath, std::ios::binary | std::ios::trunc);
+        if (!create.is_open()) return nullptr;
+    }
+    auto file = std::make_shared<std::fstream>(partPath, std::ios::binary | std::ios::in | std::ios::out);
+    if (!file->is_open()) {
+        RemovePartFile(partPath);
+        return nullptr;
+    }
+    return file;
+}
+
+int ExpectedChunkCount(std::size_t totalSize) {
+    if (totalSize == 0) return 1;
+    return static_cast<int>((totalSize + kAttachmentBinaryChunkBytes - 1) / kAttachmentBinaryChunkBytes);
+}
+
+std::size_t ExpectedChunkSize(std::size_t totalSize, int totalChunks, int index) {
+    if (index < 0 || index >= totalChunks) return 0;
+    const std::size_t start = static_cast<std::size_t>(index) * kAttachmentBinaryChunkBytes;
+    if (start >= totalSize) return 0;
+    return std::min(kAttachmentBinaryChunkBytes, totalSize - start);
+}
+
+bool WriteChunkAt(std::fstream& file, int index, const std::string& data) {
+    if (index < 0 || !file.is_open()) return false;
+    file.clear();
+    if (data.empty()) return true;
+    const std::streamoff offset =
+        static_cast<std::streamoff>(index) * static_cast<std::streamoff>(kAttachmentBinaryChunkBytes);
+    file.seekp(offset, std::ios::beg);
+    if (!file.good()) return false;
+    file.write(data.data(), static_cast<std::streamsize>(data.size()));
+    return file.good();
+}
+
+bool FinalizePartFile(const std::string& partPath,
+                      const std::string& targetPath,
+                      std::size_t expectedSize,
+                      const std::string& expectedSha256,
+                      std::string& error) {
+    std::streamoff actualSize = -1;
+    {
+        std::ifstream input(partPath, std::ios::binary | std::ios::ate);
+        if (input.is_open()) actualSize = input.tellg();
+    }
+    if (actualSize < 0 || static_cast<std::size_t>(actualSize) != expectedSize || expectedSize > kMaxAttachmentBytes) {
+        RemovePartFile(partPath);
+        error = "Attachment integrity check failed.";
+        return false;
+    }
+    if (!expectedSha256.empty()) {
+        const std::string actualSha256 = HashFileSha256(partPath);
+        if (actualSha256.empty() || !ConstantTimeEquals(actualSha256, expectedSha256)) {
+            RemovePartFile(partPath);
+            error = "Attachment integrity check failed.";
+            return false;
+        }
+    }
+    if (std::rename(partPath.c_str(), targetPath.c_str()) != 0) {
+        // Windows rename() fails when the destination already exists.
+        std::remove(targetPath.c_str());
+        if (std::rename(partPath.c_str(), targetPath.c_str()) != 0) {
+            RemovePartFile(partPath);
+            error = "Could not save the received attachment.";
+            return false;
+        }
+    }
+    return true;
+}
+
+void RemovePartFile(const std::string& partPath) {
+    if (!partPath.empty()) std::remove(partPath.c_str());
+}
+
+}  // namespace attachment_part
 
 ChatClient::ChatClient(ChatState& state) : state_(state) {}
 
@@ -243,15 +337,24 @@ void ChatClient::StartAttachmentUpload(const std::string& requester,
     uploads_.push_back({std::move(worker), done});
 }
 
+void ChatClient::DiscardIncomingTransfer(IncomingAttachmentTransfer& transfer) {
+    if (transfer.partFile) {
+        transfer.partFile->close();
+        transfer.partFile.reset();
+    }
+    attachment_part::RemovePartFile(transfer.partPath);
+    transfer.partPath.clear();
+}
+
 void ChatClient::FailPendingIncomingAttachments(const std::string& reason) {
-    bool hadPending = false;
+    std::map<std::string, IncomingAttachmentTransfer> pending;
     {
         std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
-        hadPending = !incomingAttachments_.empty();
-        incomingAttachments_.clear();
+        pending.swap(incomingAttachments_);
     }
+    for (auto& entry : pending) DiscardIncomingTransfer(entry.second);
     state_.FailRequestedAttachments();
-    if (hadPending) state_.SetLastError(reason);
+    if (!pending.empty()) state_.SetLastError(reason);
 }
 
 void ChatClient::SetCurrentUser(const std::string& user) {
@@ -343,7 +446,7 @@ bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
     state_.SetCredentialChangePending(false);
     state_.SetConnectionState(ConnState::AUTHENTICATING);
     state_.SetStatusDetail("Autenticando credenciales...");
-    AppendClientLog("SendLogin user=" + user);
+    AppendClientLog("SendLogin");
     QueueChallengeLogin(user, pass);
     if (SendRawLine("[LOGIN_INIT]:" + user + ":" + MakeStableMachineId() + "\n") < 0) {
         state_.SetAuthActionPending(false);
@@ -459,15 +562,32 @@ bool ChatClient::RequestAttachment(const AttachmentPayload& attachment, const st
     transfer.ownerUser = attachment.ownerUser;
     transfer.mode = mode;
     transfer.targetPath = savePath;
+    const std::string key = attachment.ownerUser + "|" + attachment.id;
+    IncomingAttachmentTransfer replaced;
     {
         std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
-        incomingAttachments_[attachment.ownerUser + "|" + attachment.id] = transfer;
+        auto existing = incomingAttachments_.find(key);
+        if (existing != incomingAttachments_.end()) {
+            replaced = std::move(existing->second);
+            existing->second = std::move(transfer);
+        } else {
+            incomingAttachments_.emplace(key, std::move(transfer));
+        }
     }
+    DiscardIncomingTransfer(replaced);
     state_.UpdateAttachmentState(attachment.ownerUser, attachment.id, AttachmentTransferState::Requested);
 
     if (!SendPrivateMessage(CurrentUser(), attachment.ownerUser, "@attachreq|" + attachment.id + "|" + mode)) {
-        std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
-        incomingAttachments_.erase(attachment.ownerUser + "|" + attachment.id);
+        IncomingAttachmentTransfer dropped;
+        {
+            std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
+            auto it = incomingAttachments_.find(key);
+            if (it != incomingAttachments_.end()) {
+                dropped = std::move(it->second);
+                incomingAttachments_.erase(it);
+            }
+        }
+        DiscardIncomingTransfer(dropped);
         state_.UpdateAttachmentState(attachment.ownerUser, attachment.id, AttachmentTransferState::Available);
         return false;
     }
@@ -587,37 +707,30 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester, const std
 }
 
 void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
-    std::string joined;
-    for (const auto& chunk : transfer.chunks) joined += chunk;
-
-    std::vector<unsigned char> decoded;
-    if (transfer.binaryChunks) {
-        decoded.assign(joined.begin(), joined.end());
+    // Close the stream before hashing/renaming (Windows cannot rename an open file).
+    bool ok = true;
+    std::string error;
+    if (transfer.partFile) {
+        transfer.partFile->flush();
+        ok = transfer.partFile->good();
+        transfer.partFile->close();
+        transfer.partFile.reset();
+    }
+    if (!ok) {
+        attachment_part::RemovePartFile(transfer.partPath);
+        error = "Could not save the received attachment.";
     } else {
-        if (!river::base64::Decode(joined, decoded)) {
-            state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
-            state_.SetLastError("Could not reconstruct the received attachment.");
-            return;
-        }
+        ok = attachment_part::FinalizePartFile(transfer.partPath,
+                                               transfer.targetPath,
+                                               transfer.attachment.sizeBytes,
+                                               transfer.attachment.contentSha256,
+                                               error);
     }
-    if (decoded.size() > kMaxAttachmentBytes ||
-        decoded.size() != transfer.attachment.sizeBytes ||
-        (!transfer.attachment.contentSha256.empty() &&
-         !ConstantTimeEquals(HashPassword(BytesToString(decoded)), transfer.attachment.contentSha256))) {
+    if (!ok) {
         state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
-        state_.SetLastError("Attachment integrity check failed.");
+        state_.SetLastError(error);
         return;
     }
-
-    std::ofstream output(transfer.targetPath, std::ios::binary);
-    if (!output.is_open()) {
-        state_.UpdateAttachmentState(transfer.ownerUser, transfer.attachment.id, AttachmentTransferState::Failed);
-        state_.SetLastError("Could not save the received attachment.");
-        return;
-    }
-
-    output.write(reinterpret_cast<const char*>(decoded.data()), static_cast<std::streamsize>(decoded.size()));
-    output.close();
 
     state_.UpdateAttachmentState(transfer.ownerUser,
                                  transfer.attachment.id,
@@ -640,71 +753,53 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
         if (parts.size() < 8) return true;
 
         const std::string key = sender + "|" + parts[1];
-        std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
-        auto pending = incomingAttachments_.find(key);
-        if (pending == incomingAttachments_.end()) return true;
-        IncomingAttachmentTransfer& transfer = pending->second;
-        transfer.ownerUser = sender;
-        transfer.attachment.id = parts[1];
-        transfer.attachment.ownerUser = sender;
-        transfer.attachment.kind =
-            parts[2] == "image" ? AttachmentKind::Image :
-            parts[2] == "video" ? AttachmentKind::Video : AttachmentKind::File;
-        river::base64::DecodeToString(parts[3], transfer.attachment.displayName);
-        river::base64::DecodeToString(parts[4], transfer.attachment.mimeType);
-        transfer.attachment.sizeBytes = static_cast<std::size_t>(std::strtoull(parts[5].c_str(), nullptr, 10));
-        if (transfer.attachment.sizeBytes > kMaxAttachmentBytes) {
-            incomingAttachments_.erase(key);
-            state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
-            state_.SetLastError("Attachment exceeds the transfer limit.");
-            return true;
-        }
-        transfer.mode = parts[6];
-        transfer.totalChunks = std::max(1, std::atoi(parts[7].c_str()));
-        transfer.binaryChunks = true;
-        if (transfer.totalChunks < 1 ||
-            transfer.totalChunks > static_cast<int>((kMaxAttachmentBytes + kAttachmentBinaryChunkBytes - 1) / kAttachmentBinaryChunkBytes)) {
-            incomingAttachments_.erase(key);
-            state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
-            state_.SetLastError("Attachment metadata is invalid.");
-            return true;
-        }
-        if (parts.size() >= 9) transfer.attachment.contentSha256 = parts[8];
-        transfer.receivedChunks = 0;
-        transfer.chunks.assign(transfer.totalChunks, "");
-        transfer.attachment.state = AttachmentTransferState::Requested;
-        if (transfer.targetPath.empty()) transfer.targetPath = BuildAttachmentCachePath(parts[1], transfer.attachment.displayName);
-        return true;
-    }
-
-    if (payload.rfind("@attachchunk|", 0) == 0) {
-        const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
-        if (parts.size() < 4) return true;
-
-        const std::string key = sender + "|" + parts[1];
-        IncomingAttachmentTransfer completed;
-        bool done = false;
+        IncomingAttachmentTransfer dropped;
+        std::string failure;
         {
             std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
-            auto it = incomingAttachments_.find(key);
-            if (it == incomingAttachments_.end()) return true;
+            auto pending = incomingAttachments_.find(key);
+            if (pending == incomingAttachments_.end()) return true;
+            IncomingAttachmentTransfer& transfer = pending->second;
+            if (transfer.partFile) return true;  // duplicate metadata for a transfer already in flight
+            transfer.ownerUser = sender;
+            transfer.attachment.id = parts[1];
+            transfer.attachment.ownerUser = sender;
+            transfer.attachment.kind =
+                parts[2] == "image" ? AttachmentKind::Image :
+                parts[2] == "video" ? AttachmentKind::Video : AttachmentKind::File;
+            river::base64::DecodeToString(parts[3], transfer.attachment.displayName);
+            river::base64::DecodeToString(parts[4], transfer.attachment.mimeType);
+            transfer.attachment.sizeBytes = static_cast<std::size_t>(std::strtoull(parts[5].c_str(), nullptr, 10));
+            transfer.mode = parts[6];
+            transfer.totalChunks = std::atoi(parts[7].c_str());
+            if (parts.size() >= 9) transfer.attachment.contentSha256 = parts[8];
+            transfer.receivedChunks = 0;
+            transfer.attachment.state = AttachmentTransferState::Requested;
+            if (transfer.targetPath.empty()) transfer.targetPath = BuildAttachmentCachePath(parts[1], transfer.attachment.displayName);
 
-            IncomingAttachmentTransfer& transfer = it->second;
-            transfer.binaryChunks = false;
-            const int index = std::atoi(parts[2].c_str());
-            if (index < 0 || index >= transfer.totalChunks) return true;
-            if (parts[3].size() > kAttachmentChunkChars) return true;
-            if (transfer.chunks[index].empty()) {
-                transfer.chunks[index] = parts[3];
-                transfer.receivedChunks++;
+            if (transfer.attachment.sizeBytes > kMaxAttachmentBytes) {
+                failure = "Attachment exceeds the transfer limit.";
+            } else if (transfer.totalChunks != attachment_part::ExpectedChunkCount(transfer.attachment.sizeBytes)) {
+                failure = "Attachment metadata is invalid.";
+            } else {
+                transfer.receivedIndices.assign(static_cast<std::size_t>(transfer.totalChunks), false);
+                transfer.partPath = attachment_part::PartPathFor(transfer.targetPath);
+                transfer.partFile = attachment_part::CreatePartFile(transfer.partPath);
+                if (!transfer.partFile) {
+                    transfer.partPath.clear();
+                    failure = "Could not save the received attachment.";
+                }
             }
-            if (transfer.receivedChunks == transfer.totalChunks) {
-                completed = transfer;
-                incomingAttachments_.erase(it);
-                done = true;
+            if (!failure.empty()) {
+                dropped = std::move(transfer);
+                incomingAttachments_.erase(pending);
             }
         }
-        if (done) FinishIncomingAttachment(completed);
+        if (!failure.empty()) {
+            DiscardIncomingTransfer(dropped);
+            state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
+            state_.SetLastError(failure);
+        }
         return true;
     }
 
@@ -714,10 +809,16 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender, const
 
         std::string errorText;
         river::base64::DecodeToString(parts[2], errorText);
+        IncomingAttachmentTransfer dropped;
         {
             std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
-            incomingAttachments_.erase(sender + "|" + parts[1]);
+            auto it = incomingAttachments_.find(sender + "|" + parts[1]);
+            if (it != incomingAttachments_.end()) {
+                dropped = std::move(it->second);
+                incomingAttachments_.erase(it);
+            }
         }
+        DiscardIncomingTransfer(dropped);
         state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
         state_.SetLastError(errorText.empty() ? "Could not transfer the attachment." : errorText);
         return true;
@@ -766,36 +867,54 @@ bool ChatClient::HandleAttachmentChunkFrame(const std::string& payload) {
         return true;
     }
 
+    const std::string key = sender + "|" + attachmentId;
     std::string plainChunk;
     const std::string encryptedChunk = payload.substr(offset);
-    if (!river::OpenPayloadBinary(encryptedChunk, plainChunk) ||
-        plainChunk.size() > kAttachmentBinaryChunkBytes) {
-        state_.UpdateAttachmentState(sender, attachmentId, AttachmentTransferState::Failed);
-        state_.SetLastError("Attachment chunk integrity check failed.");
-        return true;
-    }
+    const bool opened = river::OpenPayloadBinary(encryptedChunk, plainChunk) &&
+                        plainChunk.size() <= kAttachmentBinaryChunkBytes;
 
-    const std::string key = sender + "|" + attachmentId;
-    IncomingAttachmentTransfer completed;
+    IncomingAttachmentTransfer finished;
     bool done = false;
+    std::string failure;
     {
+        // A chunk write is at most kAttachmentBinaryChunkBytes, so it stays under the lock;
+        // that keeps FailPendingIncomingAttachments from deleting the file mid-write.
         std::lock_guard<std::mutex> lock(incomingAttachmentMutex_);
         auto it = incomingAttachments_.find(key);
         if (it == incomingAttachments_.end()) return true;
 
         IncomingAttachmentTransfer& transfer = it->second;
-        if (transfer.totalChunks != static_cast<int>(totalChunks)) return true;
-        if (transfer.chunks[index].empty()) {
-            transfer.chunks[index] = plainChunk;
+        if (!transfer.partFile || transfer.totalChunks != static_cast<int>(totalChunks)) return true;
+        const int chunkIndex = static_cast<int>(index);
+        if (transfer.receivedIndices[index]) return true;  // duplicate
+
+        if (!opened) {
+            failure = "Attachment chunk integrity check failed.";
+        } else if (plainChunk.size() != attachment_part::ExpectedChunkSize(transfer.attachment.sizeBytes,
+                                                                           transfer.totalChunks,
+                                                                           chunkIndex)) {
+            failure = "Attachment integrity check failed.";
+        } else if (!attachment_part::WriteChunkAt(*transfer.partFile, chunkIndex, plainChunk)) {
+            failure = "Could not save the received attachment.";
+        } else {
+            transfer.receivedIndices[index] = true;
             transfer.receivedChunks++;
         }
-        if (transfer.receivedChunks == transfer.totalChunks) {
-            completed = transfer;
+
+        if (!failure.empty() || transfer.receivedChunks == transfer.totalChunks) {
+            finished = std::move(transfer);
             incomingAttachments_.erase(it);
-            done = true;
+            done = failure.empty();
         }
     }
-    if (done) FinishIncomingAttachment(completed);
+    if (!failure.empty()) {
+        DiscardIncomingTransfer(finished);
+        state_.UpdateAttachmentState(sender, attachmentId, AttachmentTransferState::Failed);
+        state_.SetLastError(failure);
+        return true;
+    }
+    // Hashing and renaming happen outside incomingAttachmentMutex_.
+    if (done) FinishIncomingAttachment(std::move(finished));
     return true;
 }
 
@@ -859,7 +978,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetStatusDetail("Canal seguro autenticado.");
             state_.ClearLastError();
         } else if (line.rfind("SESSION:", 0) == 0) {
-            AppendClientLog("ReceiveLoop session=" + line.substr(8));
+            AppendClientLog("ReceiveLoop line=SESSION");
             state_.SetStatusDetail("Sesion segura activa.");
         } else if (IsSystemNotice(line, "UPLINK ESTABLISHED")) {
             AppendClientLog("ReceiveLoop line=UPLINK ESTABLISHED");
@@ -877,10 +996,10 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             std::string queuedUser;
             std::string queuedPass;
             if (ConsumeQueuedAutoLogin(queuedUser, queuedPass)) {
-                AppendClientLog("ReceiveLoop auto-login user=" + queuedUser);
+                AppendClientLog("ReceiveLoop auto-login");
                 SendLogin(queuedUser, queuedPass);
             } else if (ConsumeRememberedCredentials(queuedUser, queuedPass)) {
-                AppendClientLog("ReceiveLoop session-resume user=" + queuedUser);
+                AppendClientLog("ReceiveLoop session-resume");
                 state_.AddSystemLog("SYSTEM: Enlace restablecido. Reautenticando como " + queuedUser + "...");
                 SendLogin(queuedUser, queuedPass);
             }
@@ -962,7 +1081,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             }
             state_.AddIncomingWireMessage(rest, CurrentUser(), true);
         } else {
-            AppendClientLog("ReceiveLoop line=" + line);
+            AppendClientLog("ReceiveLoop line=UNHANDLED");
             state_.AddIncomingWireMessage(line, CurrentUser(), false);
         }
     }

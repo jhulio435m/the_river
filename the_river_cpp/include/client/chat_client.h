@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -12,6 +14,30 @@
 #include "client/attachment_types.h"
 #include "client/chat_state.h"
 #include "common/net_platform.h"
+
+// File helpers for streaming a received attachment to disk. Exposed so they can be
+// exercised in isolation; ChatClient is their only production user.
+namespace attachment_part {
+
+std::string PartPathFor(const std::string& targetPath);
+// Creates (truncating) the .part file and returns it opened for binary read/write.
+std::shared_ptr<std::fstream> CreatePartFile(const std::string& partPath);
+// Expected plaintext size of chunk `index` for an attachment of `totalSize` bytes.
+std::size_t ExpectedChunkSize(std::size_t totalSize, int totalChunks, int index);
+int ExpectedChunkCount(std::size_t totalSize);
+// Writes `data` at index * kAttachmentBinaryChunkBytes.
+bool WriteChunkAt(std::fstream& file, int index, const std::string& data);
+// Verifies size (and SHA-256 when expectedSha256 is non-empty) of the closed .part
+// file and renames it over targetPath. On failure the .part file is removed and
+// `error` describes the problem.
+bool FinalizePartFile(const std::string& partPath,
+                      const std::string& targetPath,
+                      std::size_t expectedSize,
+                      const std::string& expectedSha256,
+                      std::string& error);
+void RemovePartFile(const std::string& partPath);
+
+}  // namespace attachment_part
 
 class ChatClient {
 public:
@@ -38,10 +64,13 @@ private:
         std::string ownerUser;
         std::string mode;
         std::string targetPath;
+        // Chunks are streamed into partPath (targetPath + ".part") as they arrive and
+        // only renamed to targetPath once size and SHA-256 have been verified.
+        std::string partPath;
+        std::shared_ptr<std::fstream> partFile;
         int totalChunks = 0;
         int receivedChunks = 0;
-        bool binaryChunks = true;
-        std::vector<std::string> chunks;
+        std::vector<bool> receivedIndices;
     };
 
     void NetworkLoop();
@@ -61,6 +90,9 @@ private:
     void StartAttachmentUpload(const std::string& requester, const std::string& attachmentId, const std::string& mode);
     void ReapFinishedUploads(bool joinAll);
     void FailPendingIncomingAttachments(const std::string& reason);
+    // Closes and deletes the .part file of a transfer already removed from
+    // incomingAttachments_ (call without holding incomingAttachmentMutex_).
+    static void DiscardIncomingTransfer(IncomingAttachmentTransfer& transfer);
     void HandleServerPong();
     void RememberSessionCredentials();
     void ForgetSessionCredentials();

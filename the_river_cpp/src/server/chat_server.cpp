@@ -1,14 +1,23 @@
 #include "server/chat_server.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <ctime>
 #include <cstdio>
 #include <cstdint>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/select.h>
+#endif
 
 #include "common/base64.h"
 #include "common/secure_envelope.h"
@@ -30,6 +39,57 @@ constexpr int kMaxAttachmentChunksPerMinute = 1200;
 constexpr int kMaxConcurrentConnections = 256;
 constexpr int kSocketRecvTimeoutSeconds = 120;
 constexpr int kSocketSendTimeoutSeconds = 30;
+// Outbound queue bounds per client (attachment relays carry ~32 KiB chunks).
+constexpr std::size_t kMaxQueuedBytes = 16u * 1024u * 1024u;
+constexpr std::size_t kMaxQueuedFrames = 2000;
+// How long UnregisterSocket lets the writer flush before cutting the stream.
+constexpr int kUnregisterDrainMillis = 2000;
+// Graceful shutdown: wait for handlers after the notice, then force.
+constexpr int kShutdownGraceMillis = 3000;
+constexpr int kShutdownForceMillis = 2000;
+
+std::atomic<bool> g_stopRequested{false};
+
+void ShutdownRaw(SocketHandle sock) {
+#ifdef _WIN32
+    shutdown(sock, SD_BOTH);
+#else
+    shutdown(sock, SHUT_RDWR);
+#endif
+}
+
+#ifdef _WIN32
+BOOL WINAPI ConsoleCtrlHandler(DWORD type) {
+    switch (type) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_SHUTDOWN_EVENT:
+            ChatServer::RequestStop();
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+#else
+extern "C" void HandleStopSignal(int) {
+    ChatServer::RequestStop();
+}
+#endif
+
+void InstallStopHandlers() {
+#ifdef _WIN32
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+#else
+    struct sigaction sa {};
+    sa.sa_handler = HandleStopSignal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // no SA_RESTART: let select() return EINTR promptly
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    signal(SIGPIPE, SIG_IGN);
+#endif
+}
 
 void ApplySocketTimeouts(SocketHandle sock) {
 #ifdef _WIN32
@@ -170,9 +230,56 @@ void AppendSizedString(std::string& out, const std::string& value) {
 ChatServer::ChatServer(const std::string& dbPath, const std::string& logPath)
     : dbPath_(dbPath), logPath_(logPath) {}
 
+void ChatServer::RequestStop() {
+    g_stopRequested.store(true);
+}
+
 void ChatServer::RegisterSocket(SocketHandle sock) {
+    auto channel = std::make_shared<SocketChannel>();
+    channel->sock = sock;
+    channel->writer = std::thread(&ChatServer::WriterLoop, this, channel);
     std::lock_guard<std::mutex> lk(channelsMutex_);
-    channels_[sock] = std::make_shared<SocketChannel>();
+    channels_[sock] = channel;
+}
+
+void ChatServer::WriterLoop(std::shared_ptr<SocketChannel> channel) {
+    bool sendFailed = false;
+    std::unique_lock<std::mutex> lk(channel->mutex);
+    while (true) {
+        channel->cv.wait(lk, [&] {
+            return channel->closed || channel->draining || !channel->queue.empty();
+        });
+        if (channel->closed) break;
+        if (channel->queue.empty()) break;  // draining and nothing left to flush
+
+        OutboundFrame frame = std::move(channel->queue.front());
+        channel->queue.pop_front();
+        channel->queuedBytes -= frame.payload.size();
+        if (frame.closeAfter) {
+            // Everything queued before the sentinel has been written.
+            ShutdownChannelLocked(*channel);
+            break;
+        }
+
+        lk.unlock();
+        // The descriptor stays open while this thread runs: UnregisterSocket
+        // joins us before closing it.
+        const bool ok = ::SendFrame(channel->sock, frame.type, frame.payload);
+        lk.lock();
+        if (!ok) {
+            sendFailed = !channel->closed;
+            ShutdownChannelLocked(*channel);
+            break;
+        }
+    }
+    channel->accepting = false;
+    channel->queue.clear();
+    channel->queuedBytes = 0;
+    channel->writerDone = true;
+    const SocketHandle sock = channel->sock;
+    lk.unlock();
+    channel->cv.notify_all();
+    if (sendFailed) LogRuntime("NET", "send failed on socket " + std::to_string(sock));
 }
 
 void ChatServer::UnregisterSocket(SocketHandle sock) {
@@ -185,15 +292,28 @@ void ChatServer::UnregisterSocket(SocketHandle sock) {
             channels_.erase(it);
         }
     }
-    if (channel) {
-        // Wait for in-flight writers, then mark closed so late writers never
-        // touch a descriptor number that the OS may hand to a new client.
-        std::lock_guard<std::mutex> guard(channel->mutex);
-        channel->closed = true;
+    if (!channel) {
         CloseSocketHandle(sock);
-    } else {
-        CloseSocketHandle(sock);
+        return;
     }
+    {
+        std::unique_lock<std::mutex> lk(channel->mutex);
+        // Let the writer flush what is already queued (e.g. a final rate-limit
+        // notice), but never wait unboundedly on a slow peer.
+        channel->accepting = false;
+        channel->draining = true;
+        channel->cv.notify_all();
+        if (!channel->cv.wait_for(lk, std::chrono::milliseconds(kUnregisterDrainMillis),
+                                  [&] { return channel->writerDone; })) {
+            ShutdownRaw(sock);  // unblocks a writer stuck in send()
+        }
+        // From here on nobody but this thread touches the descriptor:
+        // ShutdownSocket/Enqueue check `closed` under this mutex.
+        channel->closed = true;
+    }
+    channel->cv.notify_all();
+    if (channel->writer.joinable()) channel->writer.join();
+    CloseSocketHandle(sock);
 }
 
 std::shared_ptr<ChatServer::SocketChannel> ChatServer::ChannelFor(SocketHandle sock) {
@@ -202,34 +322,97 @@ std::shared_ptr<ChatServer::SocketChannel> ChatServer::ChannelFor(SocketHandle s
     return it == channels_.end() ? nullptr : it->second;
 }
 
+void ChatServer::ShutdownChannelLocked(SocketChannel& channel) {
+    channel.accepting = false;
+    channel.queue.clear();
+    channel.queuedBytes = 0;
+    // Only shut the stream down; the owning handler thread performs the close.
+    if (!channel.closed) ShutdownRaw(channel.sock);
+    channel.cv.notify_all();
+}
+
 void ChatServer::ShutdownSocket(SocketHandle sock) {
     std::shared_ptr<SocketChannel> channel = ChannelFor(sock);
     if (!channel) return;
     std::lock_guard<std::mutex> guard(channel->mutex);
     if (channel->closed) return;
-    // Only shut the stream down; the owning handler thread performs the close.
-#ifdef _WIN32
-    shutdown(sock, SD_BOTH);
-#else
-    shutdown(sock, SHUT_RDWR);
-#endif
+    ShutdownChannelLocked(*channel);
+}
+
+bool ChatServer::Enqueue(const std::shared_ptr<SocketChannel>& channel, OutboundFrame frame) {
+    if (!channel) return false;
+    std::size_t bytes = 0;
+    std::size_t frames = 0;
+    {
+        std::lock_guard<std::mutex> guard(channel->mutex);
+        if (channel->closed || !channel->accepting) return false;
+        const std::size_t size = frame.payload.size();
+        if (channel->queue.size() >= kMaxQueuedFrames ||
+            channel->queuedBytes + size > kMaxQueuedBytes) {
+            // Never block the producer: drop the slow client instead.
+            channel->overloaded = true;
+            bytes = channel->queuedBytes;
+            frames = channel->queue.size();
+            ShutdownChannelLocked(*channel);
+        } else {
+            channel->queuedBytes += size;
+            channel->queue.push_back(std::move(frame));
+            channel->cv.notify_all();
+            return true;
+        }
+    }
+    LogRuntime("NET", "Cliente en socket " + std::to_string(channel->sock) +
+                          " saturado (" + std::to_string(frames) + " frames, " +
+                          std::to_string(bytes) + " bytes en cola); desconectando.");
+    return false;
+}
+
+void ChatServer::EnqueueFinal(const std::shared_ptr<SocketChannel>& channel, const std::string& msg) {
+    if (!channel) return;
+    std::lock_guard<std::mutex> guard(channel->mutex);
+    // Already closing (overloaded, earlier final notice, or handler exiting).
+    if (channel->closed || !channel->accepting) return;
+    // The notice bypasses the queue limits: it is small and the last frame.
+    OutboundFrame notice;
+    notice.type = kFrameTypeText;
+    notice.payload = msg;
+    channel->queuedBytes += notice.payload.size();
+    channel->queue.push_back(std::move(notice));
+    OutboundFrame sentinel;
+    sentinel.closeAfter = true;
+    channel->queue.push_back(std::move(sentinel));
+    channel->accepting = false;
+    channel->cv.notify_all();
+}
+
+void ChatServer::SendLineThenClose(SocketHandle sock, const std::string& msg) {
+    EnqueueFinal(ChannelFor(sock), msg);
 }
 
 bool ChatServer::SendFrameLocked(SocketHandle sock, std::uint16_t type, const std::string& payload) {
-    std::shared_ptr<SocketChannel> channel = ChannelFor(sock);
-    if (!channel) return false;
-    bool ok = false;
-    {
-        std::lock_guard<std::mutex> guard(channel->mutex);
-        if (channel->closed) return false;
-        ok = ::SendFrame(sock, type, payload);
-    }
-    if (!ok) LogRuntime("NET", "send failed on socket " + std::to_string(sock));
-    return ok;
+    OutboundFrame frame;
+    frame.type = type;
+    frame.payload = payload;
+    return Enqueue(ChannelFor(sock), std::move(frame));
 }
 
 bool ChatServer::SendLine(SocketHandle sock, const std::string& msg) {
     return SendFrameLocked(sock, kFrameTypeText, msg);
+}
+
+void ChatServer::ShutdownAllClients(const std::string& notice) {
+    std::vector<std::shared_ptr<SocketChannel>> snapshot;
+    {
+        std::lock_guard<std::mutex> lk(channelsMutex_);
+        for (auto& [sock, channel] : channels_) snapshot.push_back(channel);
+    }
+    for (auto& channel : snapshot) EnqueueFinal(channel, notice);
+}
+
+void ChatServer::HandlerFinished() {
+    std::lock_guard<std::mutex> lk(handlersMutex_);
+    --activeHandlers_;
+    handlersCv_.notify_all();
 }
 
 void ChatServer::RegisterAuthenticatedSession(const ClientSession& session) {
@@ -246,8 +429,7 @@ void ChatServer::RegisterAuthenticatedSession(const ClientSession& session) {
     }
     for (SocketHandle sock : replaced) {
         LogRuntime("SEC", "Sesion previa de '" + session.nick + "' reemplazada por un nuevo inicio de sesion.");
-        SendLine(sock, "SYSTEM: SESION REEMPLAZADA. Tu identidad inicio sesion desde otra conexion.");
-        ShutdownSocket(sock);
+        SendLineThenClose(sock, "SYSTEM: SESION REEMPLAZADA. Tu identidad inicio sesion desde otra conexion.");
     }
 }
 
@@ -388,8 +570,7 @@ bool ChatServer::KickUser(const std::string& nick, const std::string& reason) {
         }
     }
     if (!IsSocketValid(targetSock)) return false;
-    SendLine(targetSock, "SYSTEM: KICKED BY ADMIN. " + reason);
-    ShutdownSocket(targetSock);
+    SendLineThenClose(targetSock, "SYSTEM: KICKED BY ADMIN. " + reason);
     return true;
 }
 
@@ -414,8 +595,7 @@ void ChatServer::DisconnectByHwid(const std::string& hwid, const std::string& re
         }
     }
     for (SocketHandle sock : targets) {
-        SendLine(sock, "SYSTEM: ACCESO BLOQUEADO. " + reason);
-        ShutdownSocket(sock);
+        SendLineThenClose(sock, "SYSTEM: ACCESO BLOQUEADO. " + reason);
     }
 }
 
@@ -801,8 +981,11 @@ void ChatServer::HandleAdminCommand(SocketHandle clientSocket,
 }
 
 void ChatServer::HeartbeatLoop() {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(30));
+    while (!stopping_.load()) {
+        // Sleep 30 s in small steps so shutdown is not delayed.
+        for (int i = 0; i < 300 && !stopping_.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (stopping_.load()) break;
         std::vector<SocketHandle> stale;
         {
             std::lock_guard<std::mutex> lk(clientsMutex_);
@@ -849,7 +1032,8 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
         }
     };
 
-    RegisterSocket(clientSocket);
+    // RegisterSocket was already called by Run() so a shutdown racing with
+    // accept() still reaches this connection.
     SendLine(clientSocket, "SYSTEM: UPLINK ESTABLISHED.");
 
     while (true) {
@@ -1108,6 +1292,7 @@ void ChatServer::HandleClient(SocketHandle clientSocket) {
         Broadcast(currentNick + " salió");
         BroadcastUsers();
     }
+    HandlerFinished();  // must stay last: Run() may tear down after this
 }
 
 int ChatServer::Run() {
@@ -1163,9 +1348,23 @@ int ChatServer::Run() {
     LogRuntime("HB",  "Heartbeat cada 30s, timeout 90s.");
     LogRuntime("NET", "Maximo de conexiones simultaneas: " + std::to_string(kMaxConcurrentConnections) + ".");
 
-    std::thread(&ChatServer::HeartbeatLoop, this).detach();
+    InstallStopHandlers();
+    heartbeatThread_ = std::thread(&ChatServer::HeartbeatLoop, this);
 
-    while (true) {
+    while (!g_stopRequested.load()) {
+        // Poll the listening socket so a stop request is noticed within ~1 s.
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(serverSocket, &readSet);
+        timeval tv{};
+        tv.tv_sec = 1;
+        const int ready = select(static_cast<int>(serverSocket) + 1, &readSet, nullptr, nullptr, &tv);
+        if (ready <= 0) {
+            if (ready < 0 && !g_stopRequested.load())
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));  // EINTR or transient error
+            continue;
+        }
+
         sockaddr_in clientAddr{};
         socklen_t clientLen = sizeof(clientAddr);
         SocketHandle client = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
@@ -1173,6 +1372,7 @@ int ChatServer::Run() {
 
         if (openConnections_.load() >= kMaxConcurrentConnections) {
             LogRuntime("NET", "Limite de conexiones alcanzado; rechazando cliente.");
+            // Never registered, so a direct synchronous send is correct here.
             ::SendLine(client, "SYSTEM: SERVIDOR SATURADO. Intenta mas tarde.");
             CloseSocketHandle(client);
             continue;
@@ -1183,8 +1383,49 @@ int ChatServer::Run() {
         char ip[INET_ADDRSTRLEN] = {0};
         inet_ntop(AF_INET, &clientAddr.sin_addr, ip, sizeof(ip));
         LogRuntime("CON", "Nueva conexion: " + std::string(ip));
-        std::thread(&ChatServer::HandleClient, this, client).detach();
+        RegisterSocket(client);
+        {
+            std::lock_guard<std::mutex> lk(handlersMutex_);
+            ++activeHandlers_;
+        }
+        try {
+            std::thread(&ChatServer::HandleClient, this, client).detach();
+        } catch (const std::exception&) {
+            LogRuntime("NET", "No se pudo crear hilo para el cliente; cerrando.");
+            UnregisterSocket(client);
+            openConnections_.fetch_sub(1);
+            HandlerFinished();
+        }
     }
 
+    // ---- Graceful shutdown ----
+    LogRuntime("SYS", "Senal de parada recibida; apagando servidor...");
+    stopping_.store(true);
+    CloseSocketHandle(serverSocket);
+
+    // Deliver the notice after whatever is already queued, then close.
+    ShutdownAllClients("SYSTEM: SERVIDOR APAGANDOSE.");
+    auto waitHandlers = [&](int millis) {
+        std::unique_lock<std::mutex> lk(handlersMutex_);
+        handlersCv_.wait_for(lk, std::chrono::milliseconds(millis), [&] { return activeHandlers_ == 0; });
+        return activeHandlers_;
+    };
+    int remaining = waitHandlers(kShutdownGraceMillis);
+    if (remaining > 0) {
+        // Slow peers still draining: cut their streams so handlers exit.
+        std::vector<SocketHandle> socks;
+        {
+            std::lock_guard<std::mutex> lk(channelsMutex_);
+            for (auto& [sock, channel] : channels_) socks.push_back(sock);
+        }
+        for (SocketHandle sock : socks) ShutdownSocket(sock);
+        remaining = waitHandlers(kShutdownForceMillis);
+    }
+    if (remaining > 0)
+        LogRuntime("SYS", std::to_string(remaining) + " hilos de cliente siguen activos al apagar.");
+
+    if (heartbeatThread_.joinable()) heartbeatThread_.join();
+    repo_.Close();
+    LogRuntime("SYS", "Servidor detenido.");
     return 0;
 }

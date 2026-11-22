@@ -16,6 +16,7 @@
 #include "imgui_src/imgui.h"
 
 #include "client/app_ui.h"
+#include "client/client_settings.h"
 #include "common/tor_connection.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -162,6 +163,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     ChatState state;
     ChatClient client(state);
     ClientUiState uiState;
+    client_settings::LoadClientSettings(uiState);
     client.Start();
 
     double lastTitleUpdate = 0.0;
