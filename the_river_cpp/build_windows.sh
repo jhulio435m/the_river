@@ -3,7 +3,7 @@ set -e
 
 echo ">>> COMPILANDO BACKEND WINDOWS (MINGW)..."
 
-COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/shared_config.cpp src/common/tor_connection.cpp src/common/base64.cpp"
+COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/shared_config.cpp src/common/tor_connection.cpp src/common/base64.cpp src/common/net_transport.cpp src/common/scram.cpp src/common/e2e_crypto.cpp"
 SERVER_SRC="src/server/user_repository.cpp src/server/chat_server.cpp server.cpp"
 ADMIN_SRC="admin_console.cpp"
 CLIENT_SRC="src/client/ui_win32.cpp src/client/app_ui.cpp src/client/chat_state.cpp src/client/chat_client.cpp src/client/command_processor.cpp src/client/ui_sections.cpp src/client/attachment_utils.cpp src/client/file_picker_win32.cpp src/client/image_preview_win32.cpp"

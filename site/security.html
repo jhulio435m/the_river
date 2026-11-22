@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="es" data-title-es="Seguridad — The River" data-title-en="Security — The River">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seguridad — The River</title>
+  <meta name="description" content="Modelo de seguridad de The River: qué ve el servidor, cifrado E2E de privados y adjuntos, huellas TOFU y protocolo v2.">
+  <meta name="theme-color" content="#0000a8">
+  <meta name="referrer" content="no-referrer">
+  <link rel="canonical" href="https://theriver.soryntel.com/security.html">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css?v=2">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main"><span lang="es">Saltar al contenido</span><span lang="en">Skip to content</span></a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="26" height="26">~= the river &lt;3&gt;</a>
+      <nav aria-label="Principal / Main">
+        <ul class="nav">
+          <li><a href="index.html"><span lang="es">Inicio</span><span lang="en">Home</span></a></li>
+          <li><a href="download.html"><span lang="es">Versiones</span><span lang="en">Versions</span></a></li>
+          <li><a href="security.html" aria-current="page"><span lang="es">Seguridad</span><span lang="en">Security</span></a></li>
+          <li><a href="guide.html"><span lang="es">Guía</span><span lang="en">Guide</span></a></li>
+        </ul>
+      </nav>
+      <button type="button" class="lang-btn" data-lang-toggle lang="en" aria-label="Switch to English">EN</button>
+    </div>
+  </header>
+  <main id="main">
+
+    <h1><span lang="es">Modelo de seguridad</span><span lang="en">Security model</span></h1>
+    <p class="lead" lang="es">Aquí se explica qué información puede ver el servidor, cómo se protegen las claves y cuáles son los límites de seguridad.</p>
+    <p class="lead" lang="en">This page explains what information the server can see, how keys are protected, and the limits of that protection.</p>
+
+    <ul class="toc">
+      <li><a href="#sees"><span lang="es">Qué ve el servidor</span><span lang="en">What the server sees</span></a></li>
+      <li><a href="#keys"><span lang="es">Claves y huellas</span><span lang="en">Keys and fingerprints</span></a></li>
+      <li><a href="#limits"><span lang="es">Límites</span><span lang="en">Limits</span></a></li>
+      <li><a href="#protocol"><span lang="es">Protocolo v2</span><span lang="en">Protocol v2</span></a></li>
+    </ul>
+
+    <section id="sees" aria-labelledby="h-sees">
+      <h2 id="h-sees"><span lang="es">Qué puede y qué no puede ver el servidor</span><span lang="en">What the server can and cannot see</span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th scope="col"><span lang="es">Dato</span><span lang="en">Data</span></th>
+            <th scope="col"><span lang="es">Servidor</span><span lang="en">Server</span></th>
+            <th scope="col"><span lang="es">Red / terceros</span><span lang="en">Network / third parties</span></th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td><span lang="es">Mensajes de la sala</span><span lang="en">Room messages</span></td>
+              <td><span class="yes"><span lang="es">SÍ</span><span lang="en">YES</span></span> &mdash; <span lang="es">legibles por diseño; guarda los últimos 500, sellados en disco con la clave del servidor.</span><span lang="en">readable by design; keeps the latest 500, sealed on disk with the server key.</span></td>
+              <td><span class="no">NO</span> &mdash; <span lang="es">viajan dentro del circuito Tor hasta el servicio oculto.</span><span lang="en">they travel inside the Tor circuit to the hidden service.</span></td>
+            </tr>
+            <tr>
+              <td><span lang="es">Mensajes privados (<code>/msg</code>)</span><span lang="en">Private messages (<code>/msg</code>)</span></td>
+              <td><span class="no">NO</span> &mdash; <span lang="es">cifrados de extremo a extremo; el servidor solo reenvía o encola el sobre.</span><span lang="en">end-to-end encrypted; the server only forwards or queues the envelope.</span></td>
+              <td><span class="no">NO</span></td>
+            </tr>
+            <tr>
+              <td><span lang="es">Contenido de adjuntos</span><span lang="en">Attachment contents</span></td>
+              <td><span class="no">NO</span> &mdash; <span lang="es">cada bloque va sellado para quien lo pidió.</span><span lang="en">every chunk is sealed for the requester.</span></td>
+              <td><span class="no">NO</span></td>
+            </tr>
+            <tr>
+              <td><span lang="es">Nombre, tipo y tamaño del adjunto</span><span lang="en">Attachment name, type and size</span></td>
+              <td><span class="yes"><span lang="es">SÍ</span><span lang="en">YES</span></span> &mdash; <span lang="es">la oferta se anuncia a toda la sala.</span><span lang="en">the offer is announced to the whole room.</span></td>
+              <td><span class="no">NO</span></td>
+            </tr>
+            <tr>
+              <td><span lang="es">Metadatos: quién habla con quién, cuándo, tamaños, horas de conexión</span><span lang="en">Metadata: who talks to whom, when, sizes, online times</span></td>
+              <td><span class="yes"><span lang="es">SÍ</span><span lang="en">YES</span></span></td>
+              <td><span class="no">NO</span> &mdash; <span lang="es">salvo ataques de correlación de tráfico contra Tor.</span><span lang="en">barring traffic-correlation attacks on Tor.</span></td>
+            </tr>
+            <tr>
+              <td><span lang="es">Tu contraseña</span><span lang="en">Your password</span></td>
+              <td><span class="no">NO</span> &mdash; <span lang="es">SCRAM: guarda claves derivadas (PBKDF2, 210 000 iteraciones) que no sirven para iniciar sesión.</span><span lang="en">SCRAM: it stores derived keys (PBKDF2, 210,000 iterations) that cannot be used to log in.</span></td>
+              <td><span class="no">NO</span></td>
+            </tr>
+            <tr>
+              <td><span lang="es">Tu dirección IP</span><span lang="en">Your IP address</span></td>
+              <td><span class="no">NO</span> &mdash; <span lang="es">las conexiones llegan por Tor.</span><span lang="en">connections arrive through Tor.</span></td>
+              <td><span lang="es">Tu proveedor ve que usas Tor, no a dónde vas.</span><span lang="en">Your ISP sees that you use Tor, not where you go.</span></td>
+            </tr>
+            <tr>
+              <td>HWID</td>
+              <td><span class="yes"><span lang="es">SÍ</span><span lang="en">YES</span></span> &mdash; <span lang="es">un identificador aleatorio que el propio cliente declara.</span><span lang="en">a random identifier the client itself reports.</span></td>
+              <td><span class="no">NO</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note"><p class="tag">HWID</p>
+        <p lang="es">El HWID lo informa el cliente (se guarda en <code>.the_river_machine_id</code>) y se puede falsificar o regenerar. Un baneo por HWID frena a usuarios casuales, no a alguien decidido. Los baneos por usuario y el borrado de cuentas sí cortan el acceso de inmediato.</p>
+        <p lang="en">The HWID is reported by the client (stored in <code>.the_river_machine_id</code>) and can be spoofed or regenerated. An HWID ban slows down casual users, not a determined one. User bans and account deletion do revoke access immediately.</p>
+      </div>
+      <p lang="es">En resumen: confías en el operador del servidor para la sala y los metadatos; no necesitas confiar en él para tus privados y adjuntos <strong>si verificas las huellas</strong>.</p>
+      <p lang="en">In short: you trust the server operator with the room and with metadata; you don't have to trust them with your private messages and attachments <strong>as long as you verify fingerprints</strong>.</p>
+    </section>
+
+    <section id="keys" aria-labelledby="h-keys">
+      <h2 id="h-keys"><span lang="es">Claves, huellas y TOFU</span><span lang="en">Keys, fingerprints and TOFU</span></h2>
+      <ul class="bullets">
+        <li lang="es">Cada cuenta tiene un par de claves X25519. La pública se publica en el servidor; la privada vive solo en tu equipo, en <code>river_identity_&lt;usuario&gt;.key</code>, cifrada con tu contraseña (AES-256-GCM, PBKDF2) y con permisos <code>0600</code> en Linux/Termux.</li>
+        <li lang="en">Every account has an X25519 key pair. The public key is published on the server; the private key lives only on your device, in <code>river_identity_&lt;user&gt;.key</code>, encrypted with your password (AES-256-GCM, PBKDF2) with <code>0600</code> permissions on Linux/Termux.</li>
+        <li lang="es">La primera vez que ves la clave de alguien, el cliente la fija en <code>river_known_keys.txt</code> (<em>trust on first use</em>). Si después cambia, verás: <code>[!] La clave de &lt;usuario&gt; cambio (huella …). Verificala por otro canal.</code></li>
+        <li lang="en">The first time you see someone's key, the client pins it in <code>river_known_keys.txt</code> (<em>trust on first use</em>). If it changes later you will see: <code>[!] La clave de &lt;user&gt; cambio (huella …). Verificala por otro canal.</code></li>
+      </ul>
+      <div class="note warn"><p class="tag" lang="es">La advertencia TOFU</p><p class="tag" lang="en">The TOFU caveat</p>
+        <p lang="es">El servidor reparte las claves públicas. Un servidor malicioso podría entregarte una clave falsa <em>la primera vez</em> y leer tus privados sin que salte ningún aviso. La defensa es tuya: ejecuta <code>/fingerprint</code> y <code>/fingerprint &lt;usuario&gt;</code> y compara las huellas con tu contacto por otro canal (en persona, por teléfono). Un aviso de cambio de clave tampoco bloquea los mensajes: tómalo en serio y vuelve a verificar.</p>
+        <p lang="en">The server distributes public keys. A malicious server could hand you a fake key <em>the first time</em> and read your private messages with no warning at all. The defence is yours: run <code>/fingerprint</code> and <code>/fingerprint &lt;user&gt;</code> and compare fingerprints with your contact over another channel (in person, by phone). A key-change warning does not block messages either: take it seriously and verify again.</p>
+      </div>
+      <div class="note"><p class="tag" lang="es">Copia de seguridad</p><p class="tag" lang="en">Backups</p>
+        <p lang="es">Guarda una copia de <code>river_identity_&lt;usuario&gt;.key</code>. Si el archivo se pierde o no se puede descifrar, el cliente genera una clave nueva: tus contactos verán un aviso de cambio y los privados en cola cifrados para la clave vieja serán ilegibles.</p>
+        <p lang="en">Keep a copy of <code>river_identity_&lt;user&gt;.key</code>. If the file is lost or cannot be decrypted, the client generates a new key: your contacts will see a change warning and queued private messages sealed for the old key become unreadable.</p>
+      </div>
+    </section>
+
+    <section id="limits" aria-labelledby="h-limits">
+      <h2 id="h-limits"><span lang="es">Lo que no protege</span><span lang="en">What it does not protect</span></h2>
+      <ul class="bullets">
+        <li lang="es"><strong>Tu equipo.</strong> Malware o alguien con acceso a tu dispositivo y tu contraseña puede leerlo todo.</li>
+        <li lang="en"><strong>Your device.</strong> Malware, or someone with access to your device and password, can read everything.</li>
+        <li lang="es"><strong>Secreto hacia adelante limitado.</strong> Cada sobre usa una clave efímera, pero quien robe tu clave privada de identidad puede abrir los privados antiguos dirigidos a ti que haya capturado.</li>
+        <li lang="en"><strong>Limited forward secrecy.</strong> Each envelope uses an ephemeral key, but whoever steals your private identity key can open old captured private messages addressed to you.</li>
+        <li lang="es"><strong>La sala.</strong> No es E2E: el operador puede leerla y conserva historial.</li>
+        <li lang="en"><strong>The room.</strong> It is not E2E: the operator can read it and keeps history.</li>
+        <li lang="es"><strong>Metadatos.</strong> El servidor sabe quién existe, quién está conectado y quién escribe a quién.</li>
+        <li lang="en"><strong>Metadata.</strong> The server knows who exists, who is online and who writes to whom.</li>
+        <li lang="es"><strong>La base de datos del servidor.</strong> Si se filtra, las credenciales SCRAM no permiten entrar, pero contraseñas débiles pueden romperse por fuerza bruta. Usa contraseñas largas.</li>
+        <li lang="en"><strong>The server database.</strong> If it leaks, SCRAM credentials cannot be used to log in, but weak passwords can still be brute-forced offline. Use long passwords.</li>
+      </ul>
+    </section>
+
+    <section id="protocol" aria-labelledby="h-proto">
+      <h2 id="h-proto"><span lang="es">Protocolo v2 en breve</span><span lang="en">Protocol v2 at a glance</span></h2>
+      <p lang="es">La especificación completa está en <a href="https://github.com/jhulio435m/the_river/blob/main/the_river_cpp/docs/PROTOCOL_V2.md"><code>the_river_cpp/docs/PROTOCOL_V2.md</code></a>. Todo usa OpenSSL 3 sobre tramas binarias <code>TRV1</code>.</p>
+      <p lang="en">The full specification is in <a href="https://github.com/jhulio435m/the_river/blob/main/the_river_cpp/docs/PROTOCOL_V2.md"><code>the_river_cpp/docs/PROTOCOL_V2.md</code></a>. Everything uses OpenSSL 3 over <code>TRV1</code> binary frames.</p>
+      <div class="grid">
+        <div class="card">
+          <h3><span lang="es">Autenticación</span><span lang="en">Authentication</span></h3>
+          <ul class="bullets">
+            <li lang="es">El servidor anuncia <code>PROTO=2</code>; el cliente se niega a seguir si falta.</li>
+            <li lang="en">The server announces <code>PROTO=2</code>; the client refuses to continue without it.</li>
+            <li lang="es">SCRAM-SHA-256: reto con nonce, prueba del cliente y firma del servidor que el cliente verifica (autenticación mutua).</li>
+            <li lang="en">SCRAM-SHA-256: nonce challenge, client proof, and a server signature the client verifies (mutual authentication).</li>
+            <li lang="es">Usuarios inexistentes reciben un reto falso determinista: no se filtra quién tiene cuenta.</li>
+            <li lang="en">Unknown users get a deterministic fake challenge: account existence is not leaked.</li>
+            <li lang="es">Bloqueo tras 5 fallos por usuario o 10 por origen, durante 5 minutos.</li>
+            <li lang="en">Lockout after 5 failures per user or 10 per origin, for 5 minutes.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><span lang="es">Cifrado E2E</span><span lang="en">E2E encryption</span></h3>
+          <ul class="bullets">
+            <li lang="es">Sobre <code>RE2</code>: X25519 efímera + estática del remitente, HKDF-SHA256 y AES-256-GCM con datos asociados que atan contexto, remitente y destinatario.</li>
+            <li lang="en"><code>RE2</code> envelope: ephemeral + sender static X25519, HKDF-SHA256 and AES-256-GCM with associated data binding context, sender and recipient.</li>
+            <li lang="es">Los adjuntos se sellan bloque a bloque; el receptor verifica tamaño y SHA-256 antes de guardar.</li>
+            <li lang="en">Attachments are sealed chunk by chunk; the receiver checks size and SHA-256 before saving.</li>
+            <li lang="es">Huella = primeros 16 bytes de SHA-256 de la clave pública, en grupos <code>xxxx-xxxx-…</code>.</li>
+            <li lang="en">Fingerprint = first 16 bytes of SHA-256 of the public key, grouped <code>xxxx-xxxx-…</code>.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><span lang="es">Historial y cola</span><span lang="en">History and queue</span></h3>
+          <ul class="bullets">
+            <li lang="es">Al entrar: últimos 100 mensajes de la sala (el servidor guarda 500).</li>
+            <li lang="en">On login: the latest 100 room messages (the server keeps 500).</li>
+            <li lang="es">Privados offline: hasta 200 por destinatario, caducan a los 7 días, se borran al entregarse.</li>
+            <li lang="en">Offline PMs: up to 200 per recipient, expire after 7 days, deleted once delivered.</li>
+            <li lang="es">Límites de ritmo: 60 mensajes/min, 12 adjuntos/min.</li>
+            <li lang="en">Rate limits: 60 messages/min, 12 attachments/min.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="note warn"><p class="tag" lang="es">Clientes v1 incompatibles</p><p class="tag" lang="en">v1 clients are incompatible</p>
+        <p lang="es">No hay modo de compatibilidad: el inicio de sesión v1 equivalía a pasar el hash. Un cliente v1 recibe <code>SYSTEM: CLIENTE OBSOLETO. Actualiza al protocolo 2.</code> y se cierra la conexión. Las credenciales v1 se migran solas en el servidor; los usuarios no tienen que hacer nada salvo actualizar el cliente.</p>
+        <p lang="en">There is no compatibility mode: v1 login was effectively pass-the-hash. A v1 client receives <code>SYSTEM: CLIENTE OBSOLETO. Actualiza al protocolo 2.</code> and the connection is closed. v1 credentials migrate automatically on the server; users only need to update the client.</p>
+      </div>
+      <p lang="es">¿Encontraste un problema de seguridad? Abre un aviso en el <a href="https://github.com/jhulio435m/the_river">repositorio</a> sin incluir datos sensibles.</p>
+      <p lang="en">Found a security problem? Open a report on the <a href="https://github.com/jhulio435m/the_river">repository</a> without including sensitive data.</p>
+    </section>
+
+  </main>
+  <footer class="footbar">
+    <div class="footbar-inner">
+      <span class="foot-clock" data-clock aria-hidden="true"><span class="ye">---</span><span class="cy"> --:--:--</span></span>
+      <span><a href="https://github.com/jhulio435m/the_river">GitHub</a> &middot; <a href="https://github.com/jhulio435m/the_river/releases/latest">Releases</a> &middot; <span lang="es">Sin rastreadores ni analíticas.</span><span lang="en">No trackers, no analytics.</span></span>
+    </div>
+  </footer>
+</body>
+</html>

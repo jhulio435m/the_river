@@ -1,6 +1,7 @@
 #include "client/ui_sections.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include "client/attachment_utils.h"
 #include "client/chat_client.h"
 #include "client/chat_state.h"
+#include "client/client_settings.h"
 #include "client/command_processor.h"
 #include "client/file_picker.h"
 #include "client/image_preview.h"
@@ -43,7 +45,96 @@ float ClampPanelWidth(float width, float desiredWidth) {
     return desiredWidth < maxWidth ? desiredWidth : maxWidth;
 }
 
+constexpr std::size_t kMaxInputHistory = 100;
+
+void ReplaceInputText(ImGuiInputTextCallbackData* data, const std::string& text) {
+    data->DeleteChars(0, data->BufTextLen);
+    data->InsertChars(0, text.c_str());
+    data->CursorPos = data->BufTextLen;
+    data->SelectionStart = data->SelectionEnd = data->CursorPos;
+}
+
+void HandleHistoryNavigation(ImGuiInputTextCallbackData* data, ClientUiState& uiState) {
+    if (uiState.inputHistory.empty()) return;
+    const int count = static_cast<int>(uiState.inputHistory.size());
+    const int previous = uiState.historyPos;
+    if (data->EventKey == ImGuiKey_UpArrow) {
+        if (uiState.historyPos == -1) {
+            uiState.historyDraft.assign(data->Buf, static_cast<std::size_t>(data->BufTextLen));
+            uiState.historyPos = count - 1;
+        } else if (uiState.historyPos > 0) {
+            --uiState.historyPos;
+        }
+    } else if (data->EventKey == ImGuiKey_DownArrow) {
+        if (uiState.historyPos != -1 && ++uiState.historyPos >= count) uiState.historyPos = -1;
+    }
+    if (previous == uiState.historyPos) return;
+    ReplaceInputText(data,
+                     uiState.historyPos == -1 ? uiState.historyDraft
+                                              : uiState.inputHistory[static_cast<std::size_t>(uiState.historyPos)]);
+}
+
+void HandleNicknameCompletion(ImGuiInputTextCallbackData* data, const ClientUiState& uiState) {
+    int wordStart = data->CursorPos;
+    while (wordStart > 0) {
+        const char c = data->Buf[wordStart - 1];
+        if (c == ' ' || c == '\t' || c == ',' || c == ';') break;
+        --wordStart;
+    }
+    const std::string prefix(data->Buf + wordStart, static_cast<std::size_t>(data->CursorPos - wordStart));
+    if (prefix.empty()) return;
+
+    auto toLower = [](std::string value) {
+        for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return value;
+    };
+    const std::string lowerPrefix = toLower(prefix);
+    std::vector<std::string> matches;
+    for (const auto& candidate : uiState.completionCandidates) {
+        if (toLower(candidate).rfind(lowerPrefix, 0) == 0) matches.push_back(candidate);
+    }
+    if (matches.empty()) return;
+
+    std::string completion = matches.front();
+    if (matches.size() > 1) {
+        // Complete up to the longest common prefix of every match.
+        std::size_t common = completion.size();
+        for (const auto& match : matches) {
+            std::size_t i = 0;
+            while (i < common && i < match.size() &&
+                   std::tolower(static_cast<unsigned char>(match[i])) ==
+                       std::tolower(static_cast<unsigned char>(completion[i]))) {
+                ++i;
+            }
+            common = i;
+        }
+        completion.resize(common);
+        if (completion.size() <= prefix.size()) return;
+    } else {
+        completion += (wordStart == 0) ? ": " : " ";
+    }
+    data->DeleteChars(wordStart, data->CursorPos - wordStart);
+    data->InsertChars(wordStart, completion.c_str());
+}
+
 int CommandInputCallback(ImGuiInputTextCallbackData* data) {
+    ClientUiState* uiState = static_cast<ClientUiState*>(data->UserData);
+    if (uiState != nullptr) {
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
+            HandleHistoryNavigation(data, *uiState);
+            return 0;
+        }
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion) {
+            HandleNicknameCompletion(data, *uiState);
+            return 0;
+        }
+    }
+    if (uiState != nullptr && uiState->focusComposer && data->EventFlag == ImGuiInputTextFlags_CallbackAlways) {
+        // Text injected from a menu (e.g. "/msg user "): place the caret at the end, unselected.
+        data->CursorPos = data->BufTextLen;
+        data->SelectionStart = data->SelectionEnd = data->CursorPos;
+        uiState->focusComposer = false;
+    }
 #ifndef _WIN32
     const bool pasteRequested =
         (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) ||
@@ -127,7 +218,7 @@ void RenderConnectionScreen(ChatState& state,
                             float height,
                             ConnState connState,
                             const UiPalette& palette) {
-    const std::string statusDetail = state.StatusDetail();
+    const std::string statusDetail = state.StatusDetail(uiState.spanishUi);
     const float t = static_cast<float>(ImGui::GetTime());
     const bool compactLayout = IsCompactLayout(width);
     ImGui::SetCursorPos(ImVec2(0, 0));
@@ -168,8 +259,8 @@ void RenderCredentialChangeScreen(ChatClient& client,
                                   float height,
                                   ConnState connState,
                                   const UiPalette& palette) {
-    const std::string statusDetail = state.StatusDetail();
-    const std::string lastError = state.LastError();
+    const std::string statusDetail = state.StatusDetail(uiState.spanishUi);
+    const std::string lastError = state.LastError(uiState.spanishUi);
     const bool credentialPending = state.IsCredentialChangePending();
     const bool compactLayout = IsCompactLayout(width);
     const float panelWidth = ClampPanelWidth(width, 500.0f);
@@ -222,8 +313,8 @@ void RenderLoginScreen(ChatClient& client,
                        float height,
                        ConnState connState,
                        const UiPalette& palette) {
-    const std::string statusDetail = state.StatusDetail();
-    const std::string lastError = state.LastError();
+    const std::string statusDetail = state.StatusDetail(uiState.spanishUi);
+    const std::string lastError = state.LastError(uiState.spanishUi);
     const bool authPending = state.IsAuthActionPending();
     const bool compactLayout = IsCompactLayout(width);
     const float panelWidth = ClampPanelWidth(width, 440.0f);
@@ -297,6 +388,20 @@ bool RenderCopyableLine(const std::string& id, const std::string& text, const Im
     return clicked;
 }
 
+void RenderUserContextMenu(ClientUiState& uiState, const std::string& user, bool isMe) {
+    const std::string popupId = "##user_menu_" + user;
+    if (!ImGui::IsItemHovered() && !ImGui::IsPopupOpen(popupId.c_str())) return;
+    if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) ImGui::OpenPopup(popupId.c_str());
+    if (ImGui::BeginPopup(popupId.c_str())) {
+        if (!isMe && ImGui::Selectable(Tr(uiState, "Private message", "Mensaje privado"))) {
+            std::snprintf(uiState.input, sizeof(uiState.input), "/msg %s ", user.c_str());
+            uiState.focusComposer = true;
+        }
+        if (ImGui::Selectable(Tr(uiState, "Copy name", "Copiar nombre"))) ImGui::SetClipboardText(user.c_str());
+        ImGui::EndPopup();
+    }
+}
+
 void HandleAttachButton(ChatClient& client, ChatState& state, ClientUiState& uiState) {
     uiState.attachPickerError.clear();
     AttachmentDraft draft;
@@ -318,11 +423,11 @@ void HandleAttachButton(ChatClient& client, ChatState& state, ClientUiState& uiS
         return;
     }
     if (!client.SendAttachment(currentIdentity, draft)) {
-        uiState.attachPickerError = state.LastError().empty()
+        uiState.attachPickerError = state.LastError(uiState.spanishUi).empty()
             ? Tr(uiState,
                  "The selected attachment could not be sent.",
                  "No se pudo enviar el adjunto seleccionado.")
-            : state.LastError();
+            : state.LastError(uiState.spanishUi);
         uiState.attachPickerOpen = true;
     }
 }
@@ -362,8 +467,37 @@ void ResetAttachmentModal(ClientUiState& uiState) {
     ReleaseImagePreviewTexture(uiState.attachmentPreviewTexture);
 }
 
+// Only our own offers, or received images/videos with a matching allowlisted
+// extension, may be handed to the system shell: the kind and name of a
+// received file are chosen by its sender.
+bool CanOpenWithShell(const ChatState& state, const AttachmentPayload& attachment) {
+    if (attachment.localPath.empty()) return false;
+    if (attachment.ownerUser == state.CurrentIdentity()) return true;
+    return IsAttachmentSafeToOpen(attachment.kind, attachment.localPath);
+}
+
+void CopyReceivedAttachmentAs(ChatState& state, const AttachmentPayload& attachment) {
+    state.AddSystemLog("SYSTEM: [!] " + attachment.displayName +
+                       " no se abre desde el chat (tipo o extension no permitidos). Guardalo y revisalo antes de ejecutarlo.");
+    std::string savePath;
+    std::string saveError;
+    if (!PickAttachmentSavePath(attachment, savePath, saveError)) {
+        if (!saveError.empty()) state.AddSystemLog("SYSTEM: " + saveError);
+        return;
+    }
+    if (!CopyFileBinary(attachment.localPath, savePath, saveError)) {
+        state.AddSystemLog("SYSTEM: " + saveError);
+    } else {
+        state.AddSystemLog("SYSTEM: Attachment saved to " + savePath);
+    }
+}
+
 void SaveAttachmentAs(ChatClient& client, ChatState& state, const AttachmentPayload& attachment) {
     if (!attachment.localPath.empty()) {
+        if (!CanOpenWithShell(state, attachment)) {
+            CopyReceivedAttachmentAs(state, attachment);
+            return;
+        }
         if (!OpenPathWithShell(attachment.localPath))
             state.AddSystemLog("SYSTEM: Could not open the local file.");
         return;
@@ -454,27 +588,33 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
             } else {
                 uiState.attachmentModalError = previewError;
             }
-        } else {
+        } else if (CanOpenWithShell(state, attachment)) {
             ImGui::TextWrapped("%s",
                                Tr(uiState,
                                   "Video ready. Use Open to launch it with the system player.",
                                   "Video listo. Usa Abrir para iniciarlo con el reproductor del sistema."));
+        } else {
+            ImGui::TextWrapped("%s",
+                               Tr(uiState,
+                                  "This file does not have an allowed video extension and will not be opened. Use Save As.",
+                                  "Este archivo no tiene una extension de video permitida y no se abrira. Usa Guardar como."));
         }
 
         ImGui::Spacing();
         if (isRemoteAttachment && attachment.kind != AttachmentKind::File) {
             if (ImGui::Button(Tr(uiState, "Preview", "Previsualizar"), ImVec2(110, 0))) {
-                const std::string previewPath = BuildAttachmentCachePath(attachment.id, attachment.displayName);
+                const std::string previewPath =
+                    BuildAttachmentCachePath(attachment.ownerUser, attachment.id, attachment.displayName);
                 if (!client.RequestAttachment(attachment, previewPath, "preview"))
-                    uiState.attachmentModalError = state.LastError().empty()
+                    uiState.attachmentModalError = state.LastError(uiState.spanishUi).empty()
                         ? Tr(uiState,
                              "Could not request the preview.",
                              "No se pudo solicitar la previsualizacion.")
-                        : state.LastError();
+                        : state.LastError(uiState.spanishUi);
             }
             ImGui::SameLine();
         }
-        if (attachment.kind != AttachmentKind::File && !attachment.localPath.empty()) {
+        if (attachment.kind != AttachmentKind::File && CanOpenWithShell(state, attachment)) {
             if (ImGui::Button(Tr(uiState, "Open", "Abrir"), ImVec2(110, 0))) {
                 if (!OpenPathWithShell(attachment.localPath))
                     uiState.attachmentModalError =
@@ -555,6 +695,7 @@ void RenderHeaderBar(ChatState& state, ClientUiState& uiState, float width, cons
     ImGui::SetCursorPos(ImVec2(width - langButtonWidth - 10.0f, 6.0f));
     if (ImGui::Button(uiState.spanishUi ? "EN" : "ES", ImVec2(langButtonWidth, 24.0f))) {
         uiState.spanishUi = !uiState.spanishUi;
+        client_settings::SaveClientSettings(uiState);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s",
@@ -646,6 +787,7 @@ void RenderAuthenticatedUi(ChatClient& client,
                 const std::string& user = activeUsers[index];
                 const bool isMe = (user == currentIdentity);
                 ImGui::TextColored(isMe ? palette.bbsMagenta : palette.bbsLime, "%s", user.c_str());
+                RenderUserContextMenu(uiState, user, isMe);
                 if (index + 1 < activeUsers.size()) ImGui::SameLine();
             }
             ImGui::EndChild();
@@ -660,6 +802,7 @@ void RenderAuthenticatedUi(ChatClient& client,
         for (const auto& user : activeUsers) {
             const bool isMe = (user == currentIdentity);
             ImGui::TextColored(isMe ? palette.bbsMagenta : palette.bbsLime, " %s", user.c_str());
+            RenderUserContextMenu(uiState, user, isMe);
         }
         ImGui::EndChild();
 
@@ -745,16 +888,28 @@ void RenderAuthenticatedUi(ChatClient& client,
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0, 0, 0, 1));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     ImGui::SetNextItemWidth(-1.0f);
-    if (!ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere(0);
+    uiState.completionCandidates = activeUsers;
+    if (!ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        ImGui::SetKeyboardFocusHere(0);
     if (ImGui::InputText("##CMD",
                          uiState.input,
-                         512,
-                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
-                         CommandInputCallback)) {
-        if (uiState.input[0] != '\0') {
-            ProcessLocalCommand(client, state, currentIdentity, uiState.input);
-            std::memset(uiState.input, 0, sizeof(uiState.input));
+                         sizeof(uiState.input),
+                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways |
+                             ImGuiInputTextFlags_CallbackHistory | ImGuiInputTextFlags_CallbackCompletion,
+                         CommandInputCallback,
+                         &uiState)) {
+        const std::string submitted = TrimCopy(uiState.input);
+        if (!submitted.empty()) {
+            if (uiState.inputHistory.empty() || uiState.inputHistory.back() != submitted) {
+                uiState.inputHistory.push_back(submitted);
+                if (uiState.inputHistory.size() > kMaxInputHistory)
+                    uiState.inputHistory.erase(uiState.inputHistory.begin());
+            }
+            uiState.historyPos = -1;
+            uiState.historyDraft.clear();
+            ProcessLocalCommand(client, state, currentIdentity, submitted);
         }
+        std::memset(uiState.input, 0, sizeof(uiState.input));
     }
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar();

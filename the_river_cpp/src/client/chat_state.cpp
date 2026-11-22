@@ -5,9 +5,12 @@
 #include <sstream>
 
 #include "client/attachment_utils.h"
-#include "common/secure_envelope.h"
-#include "common/shared_config.h"
-#include "common/security_utils.h"
+
+namespace {
+
+constexpr std::size_t kMaxChatLogEntries = 1000;
+
+}  // namespace
 
 ChatState::ChatState() = default;
 
@@ -52,21 +55,29 @@ void ChatState::SetCredentialChangePending(bool value) {
 }
 
 std::string ChatState::StatusDetail() const {
-    std::lock_guard<std::mutex> lock(uiStateMutex_);
-    return statusDetail_;
+    return StatusDetail(true);
 }
 
-void ChatState::SetStatusDetail(const std::string& value) {
+std::string ChatState::StatusDetail(bool spanish) const {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    return statusDetail_.For(spanish);
+}
+
+void ChatState::SetStatusDetail(const UiText& value) {
     std::lock_guard<std::mutex> lock(uiStateMutex_);
     statusDetail_ = value;
 }
 
 std::string ChatState::LastError() const {
-    std::lock_guard<std::mutex> lock(uiStateMutex_);
-    return lastError_;
+    return LastError(true);
 }
 
-void ChatState::SetLastError(const std::string& value) {
+std::string ChatState::LastError(bool spanish) const {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    return lastError_.For(spanish);
+}
+
+void ChatState::SetLastError(const UiText& value) {
     std::lock_guard<std::mutex> lock(uiStateMutex_);
     lastError_ = value;
 }
@@ -86,6 +97,16 @@ void ChatState::SetCurrentIdentity(const std::string& user) {
     currentIdentity_ = user;
 }
 
+std::string ChatState::LastPrivatePeer() const {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    return lastPrivatePeer_;
+}
+
+void ChatState::SetLastPrivatePeer(const std::string& user) {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    lastPrivatePeer_ = user;
+}
+
 bool ChatState::ConsumeNewMessageFlag() {
     return newMessage_.exchange(false);
 }
@@ -95,8 +116,17 @@ void ChatState::MarkNewMessage() {
 }
 
 std::string ChatState::GetTimestamp() const {
-    time_t now = time(nullptr);
-    struct tm t = *localtime(&now);
+    return FormatTimestamp(0);
+}
+
+std::string ChatState::FormatTimestamp(long long unixTs) {
+    time_t value = unixTs > 0 ? static_cast<time_t>(unixTs) : time(nullptr);
+    struct tm t {};
+#ifdef _WIN32
+    localtime_s(&t, &value);
+#else
+    localtime_r(&value, &t);
+#endif
     char buf[20];
     strftime(buf, sizeof(buf), "%H:%M", &t);
     return buf;
@@ -104,10 +134,10 @@ std::string ChatState::GetTimestamp() const {
 
 void ChatState::PushLogLocked(const LogEntry& entry) {
     chatLogs_.push_back(entry);
-    if (chatLogs_.size() > 200) chatLogs_.pop_front();
+    if (chatLogs_.size() > kMaxChatLogEntries) chatLogs_.pop_front();
 }
 
-void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::string& currentUser, bool isPm) {
+void ChatState::AddIncomingWireMessage(const std::string& rawMsg) {
     std::string msg = rawMsg;
     msg.erase(std::remove(msg.begin(), msg.end(), '\r'), msg.end());
     msg.erase(std::remove(msg.begin(), msg.end(), '\n'), msg.end());
@@ -127,21 +157,44 @@ void ChatState::AddIncomingWireMessage(const std::string& rawMsg, const std::str
     }
 
     std::lock_guard<std::mutex> chatLock(chatMutex_);
-    const std::string timestamp = GetTimestamp();
+    PushLogLocked({GetTimestamp(), "SYSTEM", msg, true, false});
+}
 
-    if (msg.find(':') != std::string::npos && msg.find("SYSTEM") == std::string::npos) {
-        size_t sep = msg.find(':');
-        std::string user = msg.substr(0, sep);
-        std::string payload = msg.substr(sep + 1);
-
-        std::string dec;
-        if (!river::OpenPayload(payload, dec)) dec = "[AUTH_ERR]";
-
-        PushLogLocked({timestamp, user, dec, false, isPm});
-        if (user != currentUser) MarkNewMessage();
-    } else {
-        PushLogLocked({timestamp, "SYSTEM", msg, true, false});
+bool ChatState::AddRoomMessage(const std::string& user,
+                               const std::string& text,
+                               long long unixTs,
+                               bool fromHistory,
+                               const std::string& currentUser) {
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    if (fromHistory && unixTs > 0) {
+        for (const auto& entry : chatLogs_) {
+            if (!entry.isSystem && !entry.isAttachment && !entry.isPM &&
+                entry.unixTs == unixTs && entry.user == user && entry.text == text) {
+                return false;
+            }
+        }
     }
+    LogEntry entry{FormatTimestamp(unixTs), user, text, false, false};
+    entry.unixTs = unixTs;
+    entry.isHistory = fromHistory;
+    PushLogLocked(entry);
+    if (!fromHistory && user != currentUser) MarkNewMessage();
+    return true;
+}
+
+void ChatState::AddIncomingPrivateMessage(const std::string& user,
+                                          const std::string& text,
+                                          long long unixTs,
+                                          const std::string& currentUser) {
+    {
+        std::lock_guard<std::mutex> lock(uiStateMutex_);
+        if (user != currentUser) lastPrivatePeer_ = user;
+    }
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    LogEntry entry{FormatTimestamp(unixTs), user, "[PM] " + text, false, true};
+    entry.unixTs = unixTs;
+    PushLogLocked(entry);
+    if (user != currentUser) MarkNewMessage();
 }
 
 void ChatState::AddSystemLog(const std::string& message) {
@@ -203,6 +256,14 @@ bool ChatState::UpdateAttachmentState(const std::string& user,
         }
     }
     return false;
+}
+
+void ChatState::FailRequestedAttachments() {
+    std::lock_guard<std::mutex> chatLock(chatMutex_);
+    for (auto& entry : chatLogs_) {
+        if (entry.isAttachment && entry.attachment.state == AttachmentTransferState::Requested)
+            entry.attachment.state = AttachmentTransferState::Failed;
+    }
 }
 
 void ChatState::ClearLogs() {

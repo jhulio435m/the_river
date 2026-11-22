@@ -14,7 +14,7 @@ CXX_BIN="${CXX:-clang++}"
 CC_BIN="${CC:-clang}"
 
 # Fuentes comunes y de plataforma
-COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/tor_connection.cpp src/common/base64.cpp"
+COMMON_SRC="src/common/security_utils.cpp src/common/secure_envelope.cpp src/common/tor_connection.cpp src/common/base64.cpp src/common/shared_config.cpp src/common/net_transport.cpp src/common/scram.cpp src/common/e2e_crypto.cpp"
 RUNTIME_SRC="src/client/platform_runtime.cpp"
 CLIENT_PLATFORM_SRC="src/client/ui_termux.cpp src/client/file_picker_termux.cpp src/client/platform_open_termux.cpp"
 IMGUI_SRC="imgui_src/imgui.cpp imgui_src/imgui_draw.cpp imgui_src/imgui_tables.cpp imgui_src/imgui_widgets.cpp imgui_src/backends/imgui_impl_glfw.cpp imgui_src/backends/imgui_impl_opengl3.cpp"

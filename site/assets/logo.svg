@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">The River: nodos conectados</title>
+  <rect width="64" height="64" fill="#0000a8"/>
+  <path d="M21 30h12V18h11M33 30v17h11"
+        fill="none" stroke="#fff" stroke-width="4"/>
+  <rect x="10" y="24" width="12" height="12" fill="#00ff00"/>
+  <rect x="43" y="12" width="12" height="12" fill="#00ff00"/>
+  <rect x="43" y="41" width="12" height="12" fill="#ff00ff"/>
+</svg>

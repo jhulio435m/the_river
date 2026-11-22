@@ -22,6 +22,25 @@ bash scripts/install_termux_dependencies.sh
 
 Luego instala manualmente la app Android de `Termux:X11` desde su release nightly oficial.
 
+## Configuracion
+
+El cliente solo necesita la direccion `.onion` del servidor (protocolo 2; no uses `THE_RIVER_AES_KEY` en el cliente, es solo del servidor):
+
+```bash
+mkdir -p tor_data
+printf 'THE_RIVER_ONION=%s\n' '<tu-direccion>.onion' > tor_data/runtime.env
+```
+
+Opcional: `THE_RIVER_CLIENT_LOG=1` genera `client_runtime.log` para diagnostico (sin mensajes ni credenciales); `THE_RIVER_TOR_PROXY_PORT` cambia el puerto SOCKS de Tor (por defecto 9050).
+
+Archivos que el cliente crea en `the_river_cpp/` (haz copia de seguridad de los dos primeros, sobre todo antes de reinstalar Termux):
+
+- `river_identity_<usuario>.key`: tu clave de identidad E2E, cifrada con tu contraseña. Si se pierde, se genera otra y tus contactos veran un aviso de cambio de clave.
+- `river_known_keys.txt`: huellas fijadas (TOFU) de tus contactos.
+- `river_client.cfg`: preferencias de la interfaz.
+
+Verifica huellas con `/fingerprint` y `/fingerprint <usuario>` por otro canal.
+
 ## Arranque Rapido
 
 ```bash
@@ -55,7 +74,7 @@ bash scripts/run_termux_client.sh --rebuild
 
 ## Tor
 
-En Termux no se autolanza Tor desde el binario. Si el cliente no detecta proxy en `127.0.0.1:9050`, mostrará un error accionable.
+En Termux no se autolanza Tor desde el binario. Si el cliente no detecta proxy en `127.0.0.1:9050` (o en `THE_RIVER_TOR_PROXY_PORT`), mostrará un error accionable.
 
 ## Troubleshooting
 

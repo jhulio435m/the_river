@@ -139,12 +139,22 @@ jobs:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-glfw
-            mingw-w64-x86_64-openssl
+          msystem: UCRT64
+
+      - name: Use primary MSYS2 mirror
+        shell: msys2 {0}
+        run: |
+          sed -i 's#^Server = https://mirror.msys2.org/#Server = https://repo.msys2.org/#' \
+            /etc/pacman.d/mirrorlist.mingw /etc/pacman.d/mirrorlist.msys
+          pacman --noconfirm -Syu
+
+      - name: Install Windows dependencies
+        shell: msys2 {0}
+        run: >
+          pacman --noconfirm -S --needed
+          mingw-w64-ucrt-x86_64-toolchain
+          mingw-w64-ucrt-x86_64-glfw
+          mingw-w64-ucrt-x86_64-openssl
 
       - name: Build client using MinGW
         shell: msys2 {0}

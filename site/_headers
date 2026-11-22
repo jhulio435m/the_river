@@ -1,0 +1,17 @@
+# Cloudflare Pages response headers (https://developers.cloudflare.com/pages/configuration/headers/).
+# The site is fully static and self-contained: no inline scripts/styles, no
+# third-party requests. Keep the CSP in sync if that ever changes.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY
+  Cross-Origin-Opener-Policy: same-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+
+# Demo recordings and assets are not fingerprinted: when one changes, give it a
+# new file name (or lower these max-age values) so visitors do not keep a stale copy.
+/media/*
+  Cache-Control: public, max-age=2592000
+/assets/*
+  Cache-Control: public, max-age=604800

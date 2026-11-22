@@ -81,7 +81,25 @@ std::string EnvOrDefault(const char* name, const char* fallback) {
     return value;
 }
 
+int PortOrDefault(const char* name, int fallback) {
+    const std::string value = EnvOrDefault(name, "");
+    if (value.empty() || value.size() > 5 ||
+        value.find_first_not_of("0123456789") != std::string::npos) {
+        return fallback;
+    }
+    const int port = std::stoi(value);
+    return (port >= 1 && port <= 65535) ? port : fallback;
+}
+
 }  // namespace
+
+int ServerPort() {
+    return PortOrDefault("THE_RIVER_PORT", kServerPort);
+}
+
+int TorProxyPort() {
+    return PortOrDefault("THE_RIVER_TOR_PROXY_PORT", kTorProxyPort);
+}
 
 std::string OnionAddress() {
     return EnvOrDefault("THE_RIVER_ONION", "");
@@ -121,14 +139,20 @@ bool IsEncryptionKeyStrong(const std::string& key) {
            key.find('\r') == std::string::npos;
 }
 
+// Protocol v2: clients (GUI and admin console) only need the onion address.
+// THE_RIVER_AES_KEY is server-only (at-rest encryption).
 bool HasRequiredClientConfig() {
-    return !OnionAddress().empty() && IsEncryptionKeyStrong(EncryptionKey());
+    const std::string onion = OnionAddress();
+    return !onion.empty() && onion.size() <= 255 &&
+           onion.find_first_of(" \t\r\n") == std::string::npos;
 }
 
+// THE_RIVER_NEW_USER_PASSWORD is optional: without it /newuser generates a
+// random one-time initial password per account (recommended); with it every
+// new account gets that shared password (legacy mode).
 bool HasRequiredServerConfig() {
     return IsEncryptionKeyStrong(EncryptionKey()) &&
-           !AdminDefaultPassword().empty() &&
-           !DefaultUserPassword().empty();
+           !AdminDefaultPassword().empty();
 }
 
 }  // namespace river

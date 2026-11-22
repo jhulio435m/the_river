@@ -10,6 +10,7 @@
 #include "imgui_src/imgui.h"
 
 #include "client/app_ui.h"
+#include "client/client_settings.h"
 #include "client/platform_runtime.h"
 
 namespace {
@@ -59,7 +60,7 @@ void ConfigureLinuxUi(GLFWwindow* window) {
 
     const std::string fontPath = FindPreferredMonospaceFont(RuntimePlatform::LinuxDesktop);
     if (!fontPath.empty()) {
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f * uiScale, nullptr, io.Fonts->GetGlyphRangesDefault());
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f * uiScale, nullptr, UiGlyphRanges());
     }
 }
 
@@ -88,6 +89,7 @@ int main() {
     ChatState state;
     ChatClient client(state);
     ClientUiState uiState;
+    client_settings::LoadClientSettings(uiState);
     client.Start();
 
     double lastTitleUpdate = 0.0;

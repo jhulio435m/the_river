@@ -18,6 +18,8 @@ target_compile_options(sqlite3_obj PRIVATE -O2)
 
 add_library(river_common STATIC
     src/common/base64.cpp
+    src/common/e2e_crypto.cpp
+    src/common/scram.cpp
     src/common/secure_envelope.cpp
     src/common/security_utils.cpp
     src/common/shared_config.cpp
@@ -122,8 +124,37 @@ add_executable(river_unit_tests
 target_link_libraries(river_unit_tests PRIVATE river_common)
 add_test(NAME river_unit_tests COMMAND river_unit_tests)
 
+add_executable(river_crypto_tests
+    tests/crypto_tests.cpp
+)
+target_link_libraries(river_crypto_tests PRIVATE river_common)
+add_test(NAME river_crypto_tests COMMAND river_crypto_tests)
+
 add_executable(river_integration_tests
     tests/integration_tests.cpp
 )
 target_link_libraries(river_integration_tests PRIVATE river_server_core)
 add_test(NAME river_integration_tests COMMAND river_integration_tests)
+
+# End-to-end tests (POSIX): drive the real server binary over TCP, and the real
+# ChatClient through a local SOCKS5 shim against fake servers and the real
+# server. No display or Tor needed; each picks free ports.
+if(UNIX)
+    add_executable(river_e2e_server_tests
+        tests/e2e_server_tests.cpp
+    )
+    target_link_libraries(river_e2e_server_tests PRIVATE river_common)
+    add_test(NAME river_e2e_server_tests
+        COMMAND river_e2e_server_tests $<TARGET_FILE:the_river_server>)
+
+    add_executable(river_e2e_client_tests
+        tests/e2e_client_tests.cpp
+    )
+    target_link_libraries(river_e2e_client_tests PRIVATE river_client_core)
+    add_test(NAME river_e2e_client_tests
+        COMMAND river_e2e_client_tests $<TARGET_FILE:the_river_server>)
+
+    set_tests_properties(river_e2e_server_tests river_e2e_client_tests PROPERTIES
+        TIMEOUT 60
+        LABELS e2e)
+endif()

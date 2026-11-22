@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="es" data-title-es="The River — chat privado sobre Tor" data-title-en="The River — private chat over Tor">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The River — chat privado sobre Tor</title>
+  <meta name="description" content="The River: chat privado sobre Tor con mensajes privados cifrados de extremo a extremo, cliente retro para Windows, Linux y Termux.">
+  <meta name="theme-color" content="#0000a8">
+  <meta name="referrer" content="no-referrer">
+  <link rel="canonical" href="https://theriver.soryntel.com/">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css?v=2">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main"><span lang="es">Saltar al contenido</span><span lang="en">Skip to content</span></a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="26" height="26">~= the river &lt;3&gt;</a>
+      <nav aria-label="Principal / Main">
+        <ul class="nav">
+          <li><a href="index.html" aria-current="page"><span lang="es">Inicio</span><span lang="en">Home</span></a></li>
+          <li><a href="download.html"><span lang="es">Versiones</span><span lang="en">Versions</span></a></li>
+          <li><a href="security.html"><span lang="es">Seguridad</span><span lang="en">Security</span></a></li>
+          <li><a href="guide.html"><span lang="es">Guía</span><span lang="en">Guide</span></a></li>
+        </ul>
+      </nav>
+      <button type="button" class="lang-btn" data-lang-toggle lang="en" aria-label="Switch to English">EN</button>
+    </div>
+  </header>
+  <main id="main">
+
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <h1 id="hero-title">
+          <span lang="es">The River: un chat privado sobre Tor, con estética de BBS.</span>
+          <span lang="en">The River: a private chat over Tor, BBS style.</span>
+        </h1>
+        <p class="lead" lang="es">Un proyecto de chat en C++17 con salas, mensajes privados cifrados y conexión por Tor. Mira el prototipo en acción.</p>
+        <p class="lead" lang="en">A C++17 chat project with rooms, encrypted private messages, and Tor connectivity. See the prototype in action.</p>
+        <div class="btn-row">
+          <a class="btn" href="#demo"><span lang="es">&gt; Ver las demostraciones</span><span lang="en">&gt; Watch the demos</span></a>
+          <a class="btn alt" href="https://github.com/jhulio435m/the_river"><span lang="es">Explorar el código</span><span lang="en">Explore the code</span></a>
+        </div>
+      </div>
+
+      <div class="hero-visual">
+      <figure class="term" data-term role="img" aria-label="Ilustración animada del cliente (no es una grabación): barra azul con usuarios activos, conversación en verde y magenta y el compositor user-->. / Animated illustration of the client (not a recording): blue bar with active users, chat in lime and magenta, and the user--> composer.">
+        <div class="term-title" aria-hidden="true"><b>~= the river &lt;3&gt;</b>  [SECURE]  [Nodes: 3]</div>
+        <div class="term-head" aria-hidden="true">
+          <span><span lang="es">Usuarios activos 3 &lt;ENLACE SEGURO&gt;</span><span lang="en">Active Users 3 &lt;SECURE UPLINK&gt;</span></span>
+          <span><span class="status"><span lang="es">SEGURO</span><span lang="en">SECURE</span></span><span class="live"><span lang="es">ACTIVO</span><span lang="en">LIVE</span></span></span>
+        </div>
+        <div class="term-users-compact" aria-hidden="true"><span class="tag"><span lang="es">Ver usuarios</span><span lang="en">Show Users</span></span><span class="u-peer">ana</span> <span class="u-peer">kai</span> <span class="u-me">user</span></div>
+        <div class="term-body" aria-hidden="true">
+          <div class="term-users"><div class="u-peer">&nbsp;ana</div><div class="u-peer">&nbsp;kai</div><div class="u-me">&nbsp;user</div></div>
+          <div class="term-sep"></div>
+          <div class="term-feed">
+            <p class="u-sys" data-history><span lang="es">-- historial: últimos mensajes de la sala --</span><span lang="en">-- history: latest room messages --</span></p>
+            <p class="u-peer" data-history>&lt;ana&gt; <span lang="es">buenas, ¿alguien por el río?</span><span lang="en">hey, anyone down by the river?</span></p>
+            <p class="u-peer" data-history>&lt;kai&gt; <span lang="es">aquí, recién salido del circuito</span><span lang="en">here, fresh out of the circuit</span></p>
+            <p class="u-sys" data-history><span lang="es">user se unió</span><span lang="en">user joined</span></p>
+            <p class="u-me" data-type-es="hola río &lt;3" data-type-en="hello river &lt;3">&lt;user&gt; <span lang="es">hola río &lt;3</span><span lang="en">hello river &lt;3</span></p>
+            <p class="u-sys" data-type="/fingerprint kai"><span lang="es">Huella de kai: 7f3a-91c2-0be4-55d1-a8e0-3c77-e21b-4f90</span><span lang="en">kai fingerprint: 7f3a-91c2-0be4-55d1-a8e0-3c77-e21b-4f90</span></p>
+            <p class="u-pm" data-type-es="/msg kai ¿la huella cuadra?" data-type-en="/msg kai does the fingerprint match?"><span lang="es">[PM a kai] ¿la huella cuadra?</span><span lang="en">[PM to kai] does the fingerprint match?</span></p>
+            <p class="u-peer"><span lang="es">[PM de kai] cuadra. cifrado de extremo a extremo ;)</span><span lang="en">[PM from kai] it matches. end-to-end encrypted ;)</span></p>
+            <p class="u-peer">&lt;ana&gt; [<span lang="es">IMAGEN</span><span lang="en">IMAGE</span>] rio.png (2.1 MB)</p>
+          </div>
+        </div>
+        <div class="term-compose" aria-hidden="true">
+          <div class="term-input"><span class="prompt-user">user</span><span class="prompt-arrow">--&gt;</span> <span class="u-peer" data-term-typed></span><span class="cursor">&nbsp;</span></div>
+          <div class="term-attach"><span lang="es">Adjuntar</span><span lang="en">Attach</span></div>
+        </div>
+        <div class="term-foot" data-clock aria-hidden="true"><span class="ye">Sun Nov 22</span><span class="cy"> 00:00:00</span></div>
+      </figure>
+      <p class="mock-label"><span class="tag" lang="es">ILUSTRACIÓN</span><span class="tag" lang="en">ILLUSTRATION</span>
+        <span lang="es">Vista animada del cliente. <a href="#demo">Videos reales</a> más abajo.</span>
+        <span lang="en">Animated client preview. <a href="#demo">Real videos</a> below.</span></p>
+      </div>
+    </section>
+
+    <section id="demo" aria-labelledby="demo-title">
+      <h2 id="demo-title"><span lang="es">Demo real</span><span lang="en">Real demo</span></h2>
+      <p lang="es">Cinco momentos del prototipo funcionando.</p>
+      <p lang="en">Five moments from the working prototype.</p>
+
+      <div class="clips">
+        <figure class="clip">
+          <video data-demo muted loop playsinline preload="metadata" width="960" height="620" poster="media/login.jpg" aria-describedby="cap-login">
+            <source src="media/login.mp4" type="video/mp4">
+            <source src="media/login.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-login"><span class="rec">REC 0:26</span>
+            <span lang="es"><strong>Primer acceso.</strong> Alice entra y cambia sus credenciales iniciales.</span>
+            <span lang="en"><strong>First access.</strong> Alice signs in and changes her initial credentials.</span></figcaption>
+        </figure>
+        <figure class="clip">
+          <video data-demo muted loop playsinline preload="metadata" width="1012" height="536" poster="media/admin.jpg" aria-describedby="cap-admin">
+            <source src="media/admin.mp4" type="video/mp4">
+            <source src="media/admin.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-admin"><span class="rec">REC 0:21</span>
+            <span lang="es"><strong>Administración.</strong> Se crea una cuenta y se consulta la lista de usuarios.</span>
+            <span lang="en"><strong>Administration.</strong> An account is created and the user list is opened.</span></figcaption>
+        </figure>
+        <figure class="clip wide">
+          <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/chat.jpg" aria-describedby="cap-chat">
+            <source src="media/chat.mp4" type="video/mp4">
+            <source src="media/chat.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-chat"><span class="rec">REC 0:20</span>
+            <span lang="es"><strong>Sala.</strong> Alice y Bob conversan, completan nombres y recuperan mensajes.</span>
+            <span lang="en"><strong>Room.</strong> Alice and Bob chat, complete names, and recall messages.</span></figcaption>
+        </figure>
+        <figure class="clip wide">
+          <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/private.jpg" aria-describedby="cap-private">
+            <source src="media/private.mp4" type="video/mp4">
+            <source src="media/private.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-private"><span class="rec">REC 0:16</span>
+            <span lang="es"><strong>Mensajes privados.</strong> Comparan sus huellas de clave y se escriben con cifrado de extremo a extremo.</span>
+            <span lang="en"><strong>Private messages.</strong> They compare key fingerprints and exchange end-to-end encrypted messages.</span></figcaption>
+        </figure>
+        <figure class="clip wide">
+          <video data-demo muted loop playsinline preload="metadata" width="1600" height="620" poster="media/attachment.jpg" aria-describedby="cap-attachment">
+            <source src="media/attachment.mp4" type="video/mp4">
+            <source src="media/attachment.webm" type="video/webm">
+          </video>
+          <figcaption id="cap-attachment"><span class="rec">REC 0:24</span>
+            <span lang="es"><strong>Adjuntos.</strong> Alice comparte una imagen y Bob la abre en el cliente.</span>
+            <span lang="en"><strong>Attachments.</strong> Alice shares an image and Bob opens it in the client.</span></figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section aria-labelledby="feat-title">
+      <h2 id="feat-title"><span lang="es">Cómo funciona</span><span lang="en">How it works</span></h2>
+      <ul class="features">
+        <li><span class="k"><span lang="es">Servicio oculto de Tor</span><span lang="en">Tor hidden service</span></span>
+          <span lang="es">El servidor se publica como servicio <code>.onion</code>.</span>
+          <span lang="en">The server is published as an <code>.onion</code> service.</span></li>
+        <li><span class="k"><span lang="es">Mensajes privados</span><span lang="en">Private messages</span></span>
+          <span lang="es">Mensajes y archivos cifrados de extremo a extremo.</span>
+          <span lang="en">End-to-end encrypted messages and files.</span></li>
+        <li><span class="k"><span lang="es">Sala e historial</span><span lang="en">Room and history</span></span>
+          <span lang="es">Conversación compartida y recuperación de mensajes recientes.</span>
+          <span lang="en">Shared conversation and recent message history.</span></li>
+        <li><span class="k"><span lang="es">Cliente y administración</span><span lang="en">Client and administration</span></span>
+          <span lang="es">Interfaz gráfica y consola para gestionar las cuentas.</span>
+          <span lang="en">Graphical client and a console for managing accounts.</span></li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="project-title">
+      <h2 id="project-title"><span lang="es">Estado del proyecto</span><span lang="en">Project status</span></h2>
+      <p lang="es">El prototipo del protocolo 2 está en <a href="https://github.com/jhulio435m/the_river/pull/1">el pull request</a>. Consulta el <a href="security.html">modelo de seguridad</a> o las <a href="download.html">versiones publicadas</a>.</p>
+      <p lang="en">The protocol 2 prototype is in <a href="https://github.com/jhulio435m/the_river/pull/1">the pull request</a>. See the <a href="security.html">security model</a> or the <a href="download.html">published versions</a>.</p>
+    </section>
+
+  </main>
+  <footer class="footbar">
+    <div class="footbar-inner">
+      <span class="foot-clock" data-clock aria-hidden="true"><span class="ye">---</span><span class="cy"> --:--:--</span></span>
+      <span><a href="https://github.com/jhulio435m/the_river">GitHub</a> &middot; <a href="https://github.com/jhulio435m/the_river/releases/latest">Releases</a> &middot; <span lang="es">Sin rastreadores ni analíticas.</span><span lang="en">No trackers, no analytics.</span></span>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="es" data-title-es="Versiones — The River" data-title-en="Versions — The River">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Versiones — The River</title>
+  <meta name="description" content="Consulta las versiones publicadas de The River y su compatibilidad con el prototipo del protocolo 2.">
+  <meta name="theme-color" content="#0000a8">
+  <meta name="referrer" content="no-referrer">
+  <link rel="canonical" href="https://theriver.soryntel.com/download.html">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css?v=2">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main"><span lang="es">Saltar al contenido</span><span lang="en">Skip to content</span></a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="26" height="26">~= the river &lt;3&gt;</a>
+      <nav aria-label="Principal / Main">
+        <ul class="nav">
+          <li><a href="index.html"><span lang="es">Inicio</span><span lang="en">Home</span></a></li>
+          <li><a href="download.html" aria-current="page"><span lang="es">Versiones</span><span lang="en">Versions</span></a></li>
+          <li><a href="security.html"><span lang="es">Seguridad</span><span lang="en">Security</span></a></li>
+          <li><a href="guide.html"><span lang="es">Guía</span><span lang="en">Guide</span></a></li>
+        </ul>
+      </nav>
+      <button type="button" class="lang-btn" data-lang-toggle lang="en" aria-label="Switch to English">EN</button>
+    </div>
+  </header>
+  <main id="main">
+
+    <h1><span lang="es">Versiones y descargas</span><span lang="en">Versions and downloads</span></h1>
+    <p class="lead" lang="es">El código y las versiones publicadas están en <a href="https://github.com/jhulio435m/the_river">GitHub</a>. Los enlaces de esta página apuntan siempre al último release publicado; cada zip contiene el cliente gráfico y Tor.</p>
+    <p class="lead" lang="en">The source code and published versions are on <a href="https://github.com/jhulio435m/the_river">GitHub</a>. The links on this page always point to the latest published release; each zip contains the graphical client and Tor.</p>
+
+    <div class="note warn"><p class="tag" lang="es">Antes de probarlo</p><p class="tag" lang="en">Before trying it</p>
+      <p lang="es">Los vídeos de la portada muestran el prototipo del protocolo 2. El último release publicado puede ser anterior y no incluir esas funciones. Comprueba la versión en <a href="https://github.com/jhulio435m/the_river/releases/latest">GitHub Releases</a> y usa un cliente del mismo protocolo que el servidor. Las instrucciones de esta página corresponden al protocolo 2.</p>
+      <p lang="en">The homepage videos show the protocol 2 prototype. The latest published release may be older and lack those features. Check its version on <a href="https://github.com/jhulio435m/the_river/releases/latest">GitHub Releases</a> and use a client with the same protocol as the server. The instructions on this page are for protocol 2.</p>
+    </div>
+
+    <ul class="toc">
+      <li><a href="#windows">Windows</a></li>
+      <li><a href="#linux">Linux</a></li>
+      <li><a href="#termux">Termux (Android)</a></li>
+      <li><a href="#config"><span lang="es">Configuración</span><span lang="en">Configuration</span></a></li>
+      <li><a href="#first"><span lang="es">Primer acceso</span><span lang="en">First login</span></a></li>
+      <li><a href="#source"><span lang="es">Compilar</span><span lang="en">Build from source</span></a></li>
+    </ul>
+
+    <h2><span lang="es">Paquetes</span><span lang="en">Packages</span></h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Windows x86_64</h3>
+        <p><code>the_river_client_windows.zip</code></p>
+        <p class="muted" lang="es">Contiene <code>the_river_client.exe</code> y <code>tor_bin/</code>.</p>
+        <p class="muted" lang="en">Contains <code>the_river_client.exe</code> and <code>tor_bin/</code>.</p>
+        <a class="btn" href="https://github.com/jhulio435m/the_river/releases/latest/download/the_river_client_windows.zip"><span lang="es">Descargar .zip</span><span lang="en">Download .zip</span></a>
+      </div>
+      <div class="card">
+        <h3>Linux x86_64</h3>
+        <p><code>the_river_client_linux.zip</code></p>
+        <p class="muted" lang="es">Contiene <code>the_river_client</code> y <code>tor_bin/</code> con sus librerías.</p>
+        <p class="muted" lang="en">Contains <code>the_river_client</code> and <code>tor_bin/</code> with its libraries.</p>
+        <a class="btn" href="https://github.com/jhulio435m/the_river/releases/latest/download/the_river_client_linux.zip"><span lang="es">Descargar .zip</span><span lang="en">Download .zip</span></a>
+      </div>
+      <div class="card">
+        <h3>Android (Termux)</h3>
+        <p class="muted" lang="es">Sin binario precompilado: se compila en el dispositivo con los scripts del repositorio.</p>
+        <p class="muted" lang="en">No prebuilt binary: build it on the device with the repository scripts.</p>
+        <a class="btn alt" href="#termux"><span lang="es">Ver pasos</span><span lang="en">See steps</span></a>
+      </div>
+    </div>
+
+    <section id="windows" aria-labelledby="h-win">
+      <h2 id="h-win">Windows</h2>
+      <ol class="steps">
+        <li lang="es">Descarga <code>the_river_client_windows.zip</code> y descomprímelo en una carpeta tuya.</li>
+        <li lang="en">Download <code>the_river_client_windows.zip</code> and extract it into a folder of your own.</li>
+        <li lang="es">Crea <code>tor_data\runtime.env</code> junto al ejecutable (ver <a href="#config">Configuración</a>).</li>
+        <li lang="en">Create <code>tor_data\runtime.env</code> next to the executable (see <a href="#config">Configuration</a>).</li>
+        <li lang="es">Ejecuta <code>the_river_client.exe</code>. El cliente arranca su propio Tor si no hay uno en <code>127.0.0.1:9050</code>.</li>
+        <li lang="en">Run <code>the_river_client.exe</code>. The client starts its own Tor if none is listening on <code>127.0.0.1:9050</code>.</li>
+      </ol>
+      <p lang="es">O todo de una vez en PowerShell:</p>
+      <p lang="en">Or all at once in PowerShell:</p>
+<pre><code>New-Item -ItemType Directory -Force -Path "$HOME\TheRiverChat" | Out-Null
+cd "$HOME\TheRiverChat"
+Invoke-WebRequest -Uri "https://github.com/jhulio435m/the_river/releases/latest/download/the_river_client_windows.zip" -OutFile client.zip
+Expand-Archive -Path client.zip -DestinationPath . -Force
+New-Item -ItemType Directory -Force -Path tor_data | Out-Null
+"THE_RIVER_ONION=&lt;tu-direccion&gt;.onion" | Out-File -FilePath tor_data\runtime.env -Encoding ascii
+.\the_river_client.exe</code></pre>
+    </section>
+
+    <section id="linux" aria-labelledby="h-linux">
+      <h2 id="h-linux">Linux</h2>
+      <ol class="steps">
+        <li lang="es">Descarga <code>the_river_client_linux.zip</code> y descomprímelo.</li>
+        <li lang="en">Download <code>the_river_client_linux.zip</code> and extract it.</li>
+        <li lang="es">Da permisos de ejecución a <code>the_river_client</code> y <code>tor_bin/tor</code>.</li>
+        <li lang="en">Make <code>the_river_client</code> and <code>tor_bin/tor</code> executable.</li>
+        <li lang="es">Crea <code>tor_data/runtime.env</code> y ejecuta <code>./the_river_client</code>.</li>
+        <li lang="en">Create <code>tor_data/runtime.env</code> and run <code>./the_river_client</code>.</li>
+      </ol>
+<pre><code>mkdir -p ~/TheRiverChat &amp;&amp; cd ~/TheRiverChat
+wget -L https://github.com/jhulio435m/the_river/releases/latest/download/the_river_client_linux.zip
+unzip -o the_river_client_linux.zip
+chmod +x the_river_client tor_bin/tor
+mkdir -p tor_data
+printf 'THE_RIVER_ONION=%s\n' '&lt;tu-direccion&gt;.onion' &gt; tor_data/runtime.env
+./the_river_client</code></pre>
+      <p lang="es">Si faltan librerías del sistema, instala GLFW, OpenGL y OpenSSL 3 (en Debian/Ubuntu: <code>libglfw3</code>, <code>libgl1</code>, <code>libssl3</code>).</p>
+      <p lang="en">If system libraries are missing, install GLFW, OpenGL and OpenSSL 3 (on Debian/Ubuntu: <code>libglfw3</code>, <code>libgl1</code>, <code>libssl3</code>).</p>
+    </section>
+
+    <section id="termux" aria-labelledby="h-termux">
+      <h2 id="h-termux">Termux (Android)</h2>
+      <p lang="es">El cliente corre dentro de <strong>Termux:X11</strong> con una vista compacta (panel de usuarios plegable, adjuntos con un toque). Necesitas Termux, la app Android Termux:X11 (release nightly oficial), <code>termux-x11-nightly</code>, <code>termux-api</code> y <code>tor</code>.</p>
+      <p lang="en">The client runs inside <strong>Termux:X11</strong> with a compact layout (collapsible users panel, one-tap attachments). You need Termux, the Termux:X11 Android app (official nightly release), <code>termux-x11-nightly</code>, <code>termux-api</code> and <code>tor</code>.</p>
+<pre><code>pkg install git
+git clone https://github.com/jhulio435m/the_river
+cd the_river/the_river_cpp
+bash scripts/install_termux_dependencies.sh
+mkdir -p tor_data
+printf 'THE_RIVER_ONION=%s\n' '&lt;tu-direccion&gt;.onion' &gt; tor_data/runtime.env
+bash scripts/run_termux_client.sh --rebuild --start-tor</code></pre>
+      <ul class="bullets">
+        <li lang="es">En Termux el binario <strong>no</strong> lanza Tor por su cuenta: usa <code>--start-tor</code> o arranca <code>tor --SocksPort 9050</code> en otra sesión antes del cliente.</li>
+        <li lang="en">On Termux the binary does <strong>not</strong> launch Tor itself: pass <code>--start-tor</code> or run <code>tor --SocksPort 9050</code> in another session before the client.</li>
+        <li lang="es">Los archivos se eligen con <code>termux-storage-get</code> y se abren con <code>termux-open</code> (por eso hace falta <code>termux-api</code>).</li>
+        <li lang="en">Files are picked with <code>termux-storage-get</code> and opened with <code>termux-open</code> (hence <code>termux-api</code>).</li>
+        <li lang="es">Para recompilar a mano: <code>bash scripts/build_client_termux.sh</code>.</li>
+        <li lang="en">To rebuild by hand: <code>bash scripts/build_client_termux.sh</code>.</li>
+      </ul>
+    </section>
+
+    <section id="config" aria-labelledby="h-config">
+      <h2 id="h-config"><span lang="es">Configuración del cliente</span><span lang="en">Client configuration</span></h2>
+      <p lang="es">El cliente lee variables de entorno y, si no existen, el primer archivo que encuentre entre <code>tor_data/runtime.env</code> y <code>.env.local</code> (en la carpeta actual o junto al ejecutable). Con protocolo 2 basta con esto:</p>
+      <p lang="en">The client reads environment variables and, failing that, the first file it finds among <code>tor_data/runtime.env</code> and <code>.env.local</code> (in the current folder or next to the executable). With protocol 2 this is all it needs:</p>
+<pre><code><span class="c"># tor_data/runtime.env</span>
+THE_RIVER_ONION=&lt;tu-direccion&gt;.onion</code></pre>
+      <p lang="es">Opcional: <code>THE_RIVER_CLIENT_LOG=1</code> escribe <code>client_runtime.log</code> para diagnóstico (nunca incluye mensajes ni credenciales). Más opciones en la <a href="guide.html#env">guía</a>.</p>
+      <p lang="en">Optional: <code>THE_RIVER_CLIENT_LOG=1</code> writes <code>client_runtime.log</code> for troubleshooting (it never contains messages or credentials). More options in the <a href="guide.html#env">guide</a>.</p>
+      <p lang="es">No publiques la dirección <code>.onion</code> de tu comunidad: compártela solo con quien deba entrar.</p>
+      <p lang="en">Don't publish your community's <code>.onion</code> address: share it only with people who should join.</p>
+    </section>
+
+    <section id="first" aria-labelledby="h-first">
+      <h2 id="h-first"><span lang="es">Primer acceso</span><span lang="en">First login</span></h2>
+      <ol class="steps">
+        <li lang="es">Espera a que el estado pase de <em>NEGOCIANDO TOR</em> a <em>TOR LISTO</em>. La primera vez Tor puede tardar hasta 2 minutos en construir el circuito.</li>
+        <li lang="en">Wait for the status to go from <em>NEGOCIANDO TOR</em> to <em>TOR LISTO</em>. The first time, Tor may take up to 2 minutes to build the circuit.</li>
+        <li lang="es">Entra con el usuario y la contraseña inicial que te dio el administrador (por un canal privado).</li>
+        <li lang="en">Sign in with the username and initial password your administrator gave you (over a private channel).</li>
+        <li lang="es">El servidor pide <em>PRIMER ACCESO</em>: elige tu nombre y una contraseña de 12 a 128 caracteres (sin <code>:</code>). La contraseña nunca sale de tu equipo: solo se envían claves derivadas.</li>
+        <li lang="en">The server asks for a first-login change (<em>PRIMER ACCESO</em>): pick your name and a 12 to 128 character password (no <code>:</code>). The password never leaves your device: only derived keys are sent.</li>
+        <li lang="es">El cliente crea tu clave de identidad <code>river_identity_&lt;usuario&gt;.key</code> (cifrada con tu contraseña). <strong>Haz copia de seguridad</strong>: si la pierdes, se genera otra y tus contactos verán un aviso de cambio de clave.</li>
+        <li lang="en">The client creates your identity key <code>river_identity_&lt;user&gt;.key</code> (encrypted with your password). <strong>Back it up</strong>: if you lose it a new one is generated and your contacts will see a key-change warning.</li>
+      </ol>
+    </section>
+
+    <section id="source" aria-labelledby="h-src">
+      <h2 id="h-src"><span lang="es">Compilar desde el código</span><span lang="en">Build from source</span></h2>
+      <p lang="es">Necesitas un compilador C++17, CMake, GLFW, OpenGL y OpenSSL 3. En Debian/Ubuntu:</p>
+      <p lang="en">You need a C++17 compiler, CMake, GLFW, OpenGL and OpenSSL 3. On Debian/Ubuntu:</p>
+<pre><code>sudo apt-get install -y build-essential cmake libgl1-mesa-dev libglfw3-dev libssl-dev pkg-config
+git clone https://github.com/jhulio435m/the_river
+cd the_river/the_river_cpp
+./build.sh</code></pre>
+      <p lang="es">Produce <code>the_river_server</code>, <code>the_river_client</code> y <code>the_river_admin</code>. Para montar un servidor, sigue la <a href="guide.html#server">guía del servidor</a>.</p>
+      <p lang="en">It produces <code>the_river_server</code>, <code>the_river_client</code> and <code>the_river_admin</code>. To run a server, follow the <a href="guide.html#server">server guide</a>.</p>
+    </section>
+
+  </main>
+  <footer class="footbar">
+    <div class="footbar-inner">
+      <span class="foot-clock" data-clock aria-hidden="true"><span class="ye">---</span><span class="cy"> --:--:--</span></span>
+      <span><a href="https://github.com/jhulio435m/the_river">GitHub</a> &middot; <a href="https://github.com/jhulio435m/the_river/releases/latest">Releases</a> &middot; <span lang="es">Sin rastreadores ni analíticas.</span><span lang="en">No trackers, no analytics.</span></span>
+    </div>
+  </footer>
+</body>
+</html>

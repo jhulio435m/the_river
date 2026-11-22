@@ -29,19 +29,36 @@ public:
     bool IsCredentialChangePending() const;
     void SetCredentialChangePending(bool value);
 
+    // Without a language: the Spanish text (the protocol/feed language).
     std::string StatusDetail() const;
-    void SetStatusDetail(const std::string& value);
+    std::string StatusDetail(bool spanish) const;
+    void SetStatusDetail(const UiText& value);
 
     std::string LastError() const;
-    void SetLastError(const std::string& value);
+    std::string LastError(bool spanish) const;
+    void SetLastError(const UiText& value);
     void ClearLastError();
     std::string CurrentIdentity() const;
     void SetCurrentIdentity(const std::string& user);
+    std::string LastPrivatePeer() const;
+    void SetLastPrivatePeer(const std::string& user);
 
     bool ConsumeNewMessageFlag();
     void MarkNewMessage();
 
-    void AddIncomingWireMessage(const std::string& rawMsg, const std::string& currentUser, bool isPm = false);
+    // Lines the client does not parse itself: [USERS] lists and server notices.
+    void AddIncomingWireMessage(const std::string& rawMsg);
+    // Room message (MSG / HIST). History entries already in the feed (same user,
+    // timestamp and text, e.g. after a reconnect) are skipped; returns false then.
+    bool AddRoomMessage(const std::string& user,
+                        const std::string& text,
+                        long long unixTs,
+                        bool fromHistory,
+                        const std::string& currentUser);
+    void AddIncomingPrivateMessage(const std::string& user,
+                                   const std::string& text,
+                                   long long unixTs,
+                                   const std::string& currentUser);
     void AddSystemLog(const std::string& message);
     void AddOutgoingChat(const std::string& user, const std::string& message);
     void AddOutgoingPrivateMessage(const std::string& user, const std::string& target, const std::string& message);
@@ -51,6 +68,8 @@ public:
                                const std::string& attachmentId,
                                AttachmentTransferState state,
                                const std::string& localPath = "");
+    // Marks every attachment still waiting for data as failed (e.g. after the link drops).
+    void FailRequestedAttachments();
     void ClearLogs();
 
     std::vector<LogEntry> SnapshotLogs() const;
@@ -59,6 +78,7 @@ public:
 
 private:
     std::string GetTimestamp() const;
+    static std::string FormatTimestamp(long long unixTs);
     void PushLogLocked(const LogEntry& entry);
 
     std::atomic<int> connStateRaw_{0};
@@ -69,9 +89,10 @@ private:
     std::atomic<bool> newMessage_{false};
 
     mutable std::mutex uiStateMutex_;
-    std::string statusDetail_;
-    std::string lastError_;
+    UiText statusDetail_;
+    UiText lastError_;
     std::string currentIdentity_;
+    std::string lastPrivatePeer_;
 
     mutable std::mutex chatMutex_;
     std::deque<LogEntry> chatLogs_;
