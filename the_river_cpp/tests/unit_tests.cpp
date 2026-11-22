@@ -1,3 +1,5 @@
+// Tests rely on assert() side effects; keep them active in every build type.
+#undef NDEBUG
 #include <cassert>
 #include <cerrno>
 #include <cstdlib>

@@ -83,9 +83,10 @@ void ProcessLocalCommand(ChatClient& client,
     }
 
     if (cmd == "/help" || cmd == "/?") {
-        state.AddSystemLog("Commands: /clear /help /users /ping /msg <user> <text> /r <text> /fingerprint [user] /logout");
+        state.AddSystemLog("Commands: /clear /help /users /ping /msg <user> <text> /r <text> /fingerprint [user] /trust <user> /logout");
         state.AddSystemLog("  /msg (/pm, /w) sends an end-to-end encrypted private message; /r replies to the last one.");
         state.AddSystemLog("  /fingerprint shows your key fingerprint, or <user>'s; compare it with them over another channel.");
+        state.AddSystemLog("  /trust <user> accepts <user>'s changed key (after checking its fingerprint) and sends the messages held for them.");
         state.AddSystemLog("  Up/Down recall sent lines, Tab completes nicknames.");
         state.AddSystemLog("  Admins: /adminhelp lists server commands; other /commands are sent to the server.");
         return;
@@ -148,6 +149,18 @@ void ProcessLocalCommand(ChatClient& client,
             return;
         }
         client.ShowFingerprint(target);
+        return;
+    }
+
+    if (cmd == "/trust") {
+        std::string target;
+        std::string extra;
+        SplitCommand(rest, target, extra);
+        if (target.empty() || !extra.empty()) {
+            state.AddSystemLog("SYSTEM: Usage: /trust <user>");
+            return;
+        }
+        client.TrustPeerKey(target);
         return;
     }
 

@@ -1,7 +1,10 @@
 #include "server/user_repository.h"
 
+#include <cstdlib>
 #include <ctime>
 #include <iostream>
+
+#include <openssl/rand.h>
 
 #include "common/scram.h"
 #include "common/secure_envelope.h"
@@ -43,7 +46,38 @@ std::string MakeScramCredentialString(const std::string& password) {
     return river::scram::Serialize(credential);
 }
 
+std::string LowerAscii(std::string value) {
+    for (char& c : value)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return value;
+}
+
+// One-time initial password for /newuser: no 0/O/o, 1/l/I to avoid
+// transcription mistakes. 56 symbols; rejection sampling keeps it uniform.
+std::string GenerateInitialPassword(int length) {
+    static const char kAlphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    constexpr unsigned kAlphabetSize = sizeof(kAlphabet) - 1;  // 56
+    constexpr unsigned kLimit = 256 - (256 % kAlphabetSize);    // 224
+    std::string out;
+    unsigned char buf[64];
+    while (static_cast<int>(out.size()) < length) {
+        if (RAND_bytes(buf, sizeof(buf)) != 1) return "";
+        for (unsigned char b : buf) {
+            if (b >= kLimit) continue;
+            out.push_back(kAlphabet[b % kAlphabetSize]);
+            if (static_cast<int>(out.size()) == length) break;
+        }
+    }
+    return IsStrongEnoughPassword(out) ? out : "";
+}
+
 }  // namespace
+
+bool UserRepository::IsReservedUsername(const std::string& username) {
+    const std::string lower = LowerAscii(username);
+    return lower == "admin" || lower == "system" || lower == "server" ||
+           lower == LowerAscii(river::AdminUsername());
+}
 
 UserRepository::~UserRepository() {
     Close();
@@ -145,6 +179,69 @@ bool UserRepository::MigrateV1CredentialsLocked() {
     return true;
 }
 
+bool UserRepository::EnsureSettingsLocked() {
+    if (!ExecSQLLocked(
+            "CREATE TABLE IF NOT EXISTS server_settings ("
+            "key TEXT PRIMARY KEY,"
+            "value TEXT NOT NULL"
+            ");"))
+        return false;
+    {
+        Stmt st(db_, "SELECT value FROM server_settings WHERE key='fake_salt_secret';");
+        if (!st.ok()) return false;
+        const int rc = st.Step();
+        if (rc == SQLITE_ROW && st.ColText(0).size() >= 32) {
+            fakeSaltSecret_ = st.ColText(0);
+            return true;
+        }
+        if (rc != SQLITE_ROW && rc != SQLITE_DONE) return false;
+    }
+    // Generated once and kept: fake salts for unknown users must stay stable
+    // across restarts, exactly like real salts do.
+    const std::string secret = RandomHex(32);
+    if (secret.size() != 64) return false;
+    Stmt up(db_, "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('fake_salt_secret', ?);");
+    if (!up.ok()) return false;
+    up.Text(1, secret);
+    if (up.Step() != SQLITE_DONE) return false;
+    fakeSaltSecret_ = secret;
+    return true;
+}
+
+bool UserRepository::EnsureCaseInsensitiveUsernamesLocked() {
+    // Existing names that differ only in letter case cannot get the unique
+    // index. They are logged and kept (both accounts still log in with their
+    // exact name); no new account or rename can add another variant because
+    // UsernameTakenLocked compares with NOCASE anyway.
+    std::vector<std::string> duplicates;
+    {
+        Stmt st(db_,
+                "SELECT group_concat(username, ', ') FROM users "
+                "GROUP BY username COLLATE NOCASE HAVING COUNT(*) > 1;");
+        if (!st.ok()) return false;
+        int rc;
+        while ((rc = st.Step()) == SQLITE_ROW) duplicates.push_back(st.ColText(0));
+        if (rc != SQLITE_DONE) return false;
+    }
+    for (const auto& group : duplicates) {
+        std::cerr << "[DB] Cuentas cuyo nombre solo difiere en mayusculas/minusculas: " << group
+                  << ". Se conservan; renombra o elimina las que sobren (/deluser)." << std::endl;
+    }
+    {
+        Stmt st(db_, "SELECT username FROM users WHERE is_admin=0;");
+        if (!st.ok()) return false;
+        while (st.Step() == SQLITE_ROW) {
+            const std::string name = st.ColText(0);
+            if (IsReservedUsername(name))
+                std::cerr << "[DB] La cuenta '" << name << "' usa un nombre reservado; considera eliminarla."
+                          << std::endl;
+        }
+    }
+    if (!duplicates.empty()) return true;
+    return ExecSQLLocked(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE);");
+}
+
 bool UserRepository::InitSchema() {
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ == nullptr) return false;
@@ -226,6 +323,17 @@ bool UserRepository::InitSchema() {
             ExecSQLLocked("ROLLBACK;");
             return false;
         }
+    }
+
+    // v3: persistent settings (fake-salt secret) and case-insensitive
+    // username uniqueness. Both steps are idempotent and run on every start.
+    if (!EnsureSettingsLocked() || !EnsureCaseInsensitiveUsernamesLocked()) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
+    }
+    if (SchemaVersionLocked() < 3 && !SetSchemaVersionLocked(3)) {
+        ExecSQLLocked("ROLLBACK;");
+        return false;
     }
 
     if (!EnsureDefaultAdminLocked()) {
@@ -324,6 +432,26 @@ bool UserRepository::UserExistsLocked(const std::string& username) {
     return exists;
 }
 
+bool UserRepository::UsernameTakenLocked(const std::string& username, const std::string& exceptExact) {
+    Stmt st(db_, "SELECT 1 FROM users WHERE username = ?1 COLLATE NOCASE AND username <> ?2 LIMIT 1;");
+    if (!st.ok()) return true;  // fail closed
+    st.Text(1, username);
+    st.Text(2, exceptExact);
+    const int rc = st.Step();
+    return rc != SQLITE_DONE;  // a row, or an error (fail closed)
+}
+
+bool UserRepository::UsernameTaken(const std::string& username) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (db_ == nullptr) return true;
+    return UsernameTakenLocked(username, std::string());
+}
+
+std::string UserRepository::FakeSaltSecret() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return fakeSaltSecret_;
+}
+
 bool UserRepository::UserExists(const std::string& username) {
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ == nullptr) return false;
@@ -354,24 +482,40 @@ std::string UserRepository::NextSequentialUsernameLocked() {
     return "user" + std::to_string(nextId);
 }
 
-bool UserRepository::CreateNextUser(std::string& createdUsername) {
+bool UserRepository::CreateNextUser(std::string& createdUsername, std::string& initialPassword) {
+    createdUsername.clear();
+    initialPassword.clear();
+    const std::string sharedPassword = river::DefaultUserPassword();
+    std::string password = sharedPassword;
+    if (password.empty()) {
+        password = GenerateInitialPassword(kInitialPasswordChars);
+        if (password.empty()) return false;
+    }
+    // PBKDF2 outside the DB lock.
+    const std::string passwordHash = MakeScramCredentialString(password);
+    if (passwordHash.empty()) return false;
+
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ == nullptr) return false;
 
-    createdUsername = NextSequentialUsernameLocked();
-    sqlite3_stmt* st = nullptr;
-    std::string passwordHash = MakeScramCredentialString(river::DefaultUserPassword());
-    if (passwordHash.empty()) return false;
-    sqlite3_prepare_v2(
-        db_,
-        "INSERT INTO users (username, password_hash, first_login, hwid, is_admin) "
-        "VALUES (?, ?, 1, NULL, 0);",
-        -1, &st, nullptr);
-    sqlite3_bind_text(st, 1, createdUsername.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 2, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
-    bool ok = sqlite3_step(st) == SQLITE_DONE;
-    sqlite3_finalize(st);
-    return ok;
+    std::string candidate = NextSequentialUsernameLocked();
+    // Skip names already taken in another letter case (e.g. "USER7").
+    for (int i = 0; i < 1000 && (UsernameTakenLocked(candidate, std::string()) || IsReservedUsername(candidate)); ++i) {
+        const int n = std::atoi(candidate.c_str() + 4);
+        candidate = "user" + std::to_string(n + 1);
+    }
+    if (UsernameTakenLocked(candidate, std::string())) return false;
+
+    Stmt st(db_,
+            "INSERT INTO users (username, password_hash, first_login, hwid, is_admin) "
+            "VALUES (?, ?, 1, NULL, 0);");
+    if (!st.ok()) return false;
+    st.Text(1, candidate);
+    st.Text(2, passwordHash);
+    if (st.Step() != SQLITE_DONE) return false;
+    createdUsername = candidate;
+    if (sharedPassword.empty()) initialPassword = password;
+    return true;
 }
 
 bool UserRepository::ResetUserPassword(const std::string& username, const std::string& newPassword) {
@@ -398,6 +542,11 @@ bool UserRepository::CompleteFirstLoginWithCredential(const std::string& oldUser
                                                       const std::string& saltHex,
                                                       const std::string& storedKeyHex,
                                                       const std::string& serverKeyHex) {
+    // Every credential the server stores uses the same iteration count, so the
+    // challenge for an unknown user (fake salt, kDefaultIterations) looks the
+    // same as a real one.
+    if (iterations != river::scram::kDefaultIterations) return false;
+    if (!IsValidUsername(newUsername) || IsReservedUsername(newUsername)) return false;
     river::scram::Credential credential;
     if (!river::scram::CredentialFromParts(iterations, saltHex, storedKeyHex, serverKeyHex, credential))
         return false;
@@ -406,7 +555,8 @@ bool UserRepository::CompleteFirstLoginWithCredential(const std::string& oldUser
 
     std::lock_guard<std::mutex> lk(mutex_);
     if (db_ == nullptr || oldUsername.empty() || newUsername.empty()) return false;
-    if (newUsername != oldUsername && UserExistsLocked(newUsername)) return false;
+    // Case-insensitive: "Admin"/"ALICE" cannot shadow "admin"/"alice".
+    if (UsernameTakenLocked(newUsername, oldUsername)) return false;
 
     if (!ExecSQLLocked("BEGIN IMMEDIATE;")) return false;
     bool ok = false;
@@ -656,6 +806,14 @@ OfflineQueueResult UserRepository::QueueOfflinePm(const std::string& toUser,
         st.Text(1, toUser);
         if (st.Step() != SQLITE_ROW) return fail(OfflineQueueResult::Error);
         if (st.ColInt64(0) >= kOfflinePmPerRecipient) return fail(OfflineQueueResult::Full);
+    }
+    {
+        Stmt st(db_, "SELECT COUNT(*) FROM offline_pm WHERE to_user=? AND from_user=?;");
+        if (!st.ok()) return fail(OfflineQueueResult::Error);
+        st.Text(1, toUser);
+        st.Text(2, fromUser);
+        if (st.Step() != SQLITE_ROW) return fail(OfflineQueueResult::Error);
+        if (st.ColInt64(0) >= kOfflinePmPerSenderPerRecipient) return fail(OfflineQueueResult::SenderQuota);
     }
     {
         Stmt st(db_, "INSERT INTO offline_pm (to_user, from_user, ts, envelope) VALUES (?, ?, ?, ?);");

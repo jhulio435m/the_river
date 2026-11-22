@@ -26,7 +26,9 @@
 //   outbound queue onto the socket. Started in RegisterSocket and joined in
 //   UnregisterSocket before the descriptor is closed, so no thread ever
 //   touches a closed (possibly reused) descriptor.
-// * One heartbeat thread (joined on shutdown).
+// * One heartbeat thread (joined on shutdown): every second it enforces the
+//   pre-authentication deadlines; every 30 s it PINGs, reaps silent sessions
+//   and prunes the login-failure tables.
 //
 // Producers (SendLine/SendFrameLocked/Broadcast...) only enqueue; they never
 // block on the network.
@@ -37,7 +39,7 @@
 //   "route PM2 (deliver or queue)" and "register session + replay history +
 //   drain offline PMs", so a login never misses or duplicates a MSG/PM2.
 //   The repository's own mutex is a leaf.
-//   attemptsMutex_ -> logMutex_
+//   attemptsMutex_ -> logMutex_ (attemptsMutex_ is otherwise a leaf)
 //   handlersMutex_ is a leaf. logMutex_ is never taken while holding a
 //   SocketChannel::mutex (log after releasing it).
 class ChatServer {
@@ -71,6 +73,22 @@ private:
         bool writerDone = false;  // writer thread has left its loop
         bool overloaded = false;
         std::thread writer;
+        // Connection lifecycle, read by the accept loop and the heartbeat.
+        // phase: kPhasePreAuth until AUTH_OK, kPhaseFirstLogin while waiting
+        // for [CHANGE2], kPhaseAuthenticated once the session is registered.
+        std::atomic<int> phase{0};
+        std::atomic<long long> phaseSinceMs{0};  // steady clock, ms
+        std::atomic<bool> evicted{false};          // chosen for eviction / reaping
+    };
+    static constexpr int kPhasePreAuth = 0;
+    static constexpr int kPhaseFirstLogin = 1;
+    static constexpr int kPhaseAuthenticated = 2;
+
+    // Failed-proof bookkeeping (bounded, pruned from the heartbeat).
+    struct FailureEntry {
+        int count = 0;           // failures inside the current window
+        time_t windowStart = 0;
+        time_t lastFailure = 0;
     };
 
     struct ClientSession {
@@ -114,6 +132,19 @@ private:
     void UnregisterSocket(SocketHandle sock);
     std::shared_ptr<SocketChannel> ChannelFor(SocketHandle sock);
     void ShutdownSocket(SocketHandle sock);
+    void ShutdownChannel(const std::shared_ptr<SocketChannel>& channel);
+    void SetPhase(const std::shared_ptr<SocketChannel>& channel, int phase);
+    // Accept-time admission: false = reject (all slots held by authenticated
+    // or first-login connections). May evict the oldest pre-auth connection.
+    bool AdmitNewConnection();
+    void EnforceConnectionDeadlines();
+    // Login-failure throttle (see PROTOCOL_V2.md implementation notes).
+    void RecordLoginFailure(const std::string& userKey);
+    void ClearLoginFailures(const std::string& userKey);
+    int FailureDelayMillis(const std::string& userKey);
+    void PruneLoginFailures();
+    // Sleeps in small steps; returns early when the server is stopping.
+    void ThrottleSleep(int millis);
     void RegisterAuthenticatedSession(const ClientSession& session);
     void Broadcast(const std::string& msg);
     void BroadcastUsers();
@@ -126,7 +157,8 @@ private:
     void LogEncryptedMessage(const std::string& user, const std::string& encryptedPayload);
     void LogRuntime(const std::string& category, const std::string& message);
     std::string BuildUsersSnapshot();
-    // SCRAM proof check plus lockout / HWID policy. On Ok/FirstLogin,
+    // SCRAM proof check plus failure accounting / HWID policy (a valid proof
+    // is never refused because of earlier failures). On Ok/FirstLogin,
     // serverSignatureRaw holds the 32-byte ServerSignature for AUTH_OK.
     LoginResult AuthorizeLoginProof(const std::string& username,
                                     const std::string& hwid,
@@ -151,10 +183,11 @@ private:
     UserRepository repo_;
 
     std::map<SocketHandle, ClientSession> clients_;
-    std::map<std::string, time_t> loginLocks_;
-    std::map<std::string, int> loginFailures_;
-    std::map<std::string, int> loginFailuresByOrigin_;
-    std::map<std::string, time_t> loginLocksByOrigin_;
+    // Keyed by lower-cased username; at most kMaxFailureEntries entries.
+    std::map<std::string, FailureEntry> loginFailures_;
+    // Server-wide failed proofs in the current minute (global throttle).
+    int globalFailures_ = 0;
+    time_t globalFailureWindowStart_ = 0;
     std::map<SocketHandle, std::shared_ptr<SocketChannel>> channels_;
     std::atomic<int> openConnections_{0};
     std::atomic<bool> stopping_{false};
@@ -167,6 +200,7 @@ private:
     std::mutex attemptsMutex_;
     std::mutex logMutex_;
     std::mutex deliveryMutex_;
-    // Per-process random secret for fake salts (never persisted).
+    // Secret for fake salts: loaded from the database (server_settings) at
+    // startup so fake salts are stable across restarts, like real ones.
     std::string fakeSaltSecret_;
 };

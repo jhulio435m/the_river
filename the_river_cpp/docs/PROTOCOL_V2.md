@@ -178,6 +178,83 @@ S→to: PM2:<fromUser>:<unixTs>:<envelopeB64>
 - Receiver streams chunks to `<target>.part` on disk (no whole-file buffer),
   verifies size + SHA-256 at the end, then renames.
 
+### 4.4 Client-side message integrity
+
+Client-only rules (the server relays envelopes opaquely and is unaffected).
+
+**RM1 plaintext.** Every PM2 *and* PMX envelope (text PMs and `@attach*`
+control alike) seals
+
+```
+RM1|<msgIdHex32>|<senderUnixTs>|<payload>
+```
+
+- `msgIdHex32`: 16 random bytes, 32 lowercase hex chars, fresh per send.
+- `senderUnixTs`: sender clock, decimal seconds (> 0) at sealing time.
+- `payload`: the v1-style text or `@attachreq|...` / `@attachmeta|...` /
+  `@attacherr|...` string; it may contain `|`.
+
+The receiver, after opening the envelope:
+
+1. Plaintext not matching `RM1|` + 32 lowercase hex + `|` + digits + `|` →
+   rejected, system log `[PM ilegible de <user>]` (no legacy format).
+2. `senderUnixTs` older than 8 days (server keeps offline PMs 7 days) or more
+   than 24 h in the future → dropped
+   (`SYSTEM: [!] Mensaje privado de <user> descartado (marca de tiempo fuera de rango).`).
+3. A `msgId` already seen from that peer → dropped as a replay
+   (`SYSTEM: [!] Mensaje privado repetido de <user> descartado (reenvio).`);
+   control messages are dropped silently.
+4. Otherwise the id is recorded *before* the message is shown or acted on, and
+   the PM is displayed with `senderUnixTs` (authenticated) instead of the
+   server `ts`.
+
+Seen ids are kept per (local user, peer): at most 5000 ids per peer; when the
+oldest is evicted its timestamp becomes the peer's *watermark* and anything
+with `senderUnixTs <= watermark` is rejected, so eviction never reopens a
+replay window. Persisted in `river_seen_ids.txt` (client data directory),
+append-only lines `S <me> <peer> <msgId> <ts>` and `W <me> <peer> <watermark>`,
+compacted on load / when it grows; entries older than 8 days are pruned.
+
+**Key changes (supersedes the re-pin sentence of section 3).** When a fetched
+key's fingerprint differs from the pinned one, the client does **not** re-pin.
+It logs
+`[!] La clave de <user> cambio (huella <fp>). Verificala por otro canal. Usa /trust <user> para aceptar la nueva clave.`
+and marks the peer *unverified-changed*: pending and new outgoing PMs, outgoing
+attachment control and uploads requested by that peer are held (bounded) with
+a `SYSTEM:` line saying so; incoming PMs still open with the new key but are
+shown prefixed `[clave no verificada] `; an `@attachmeta` from such a peer
+fails the transfer. `/trust <user>` pins exactly the fingerprint shown in the
+warning and flushes what was held (re-fetching the key first if it is no longer
+cached; if it changed again the cycle repeats). Unverified state is not stored:
+the pin file still holds the old fingerprint, so it is re-detected after a
+restart.
+
+**Key directory use.** Received PMs whose sender key is unknown are buffered
+(256 per sender, 2000 total) until the `KEY:` reply. KEY_GET requests made
+while processing incoming lines are coalesced (60 ms window or 50 names) into
+`[KEY_GET]:<u1>,<u2>,...` lines of at most 50 names; requests from the user
+(sending a PM, `/fingerprint`) go out at once (single name). If the server
+answers a list as one name (`KEY:<a,b>:-`), the client falls back to one name
+per line. After `SYSTEM: LIMITE DE CONSULTAS DE CLAVES EXCEDIDO.` unanswered
+names stay pending and are asked again 61 s later.
+
+**Attachments.** Uploads: at most 2 concurrent, one per (requester, id);
+duplicates of an in-flight or queued request are ignored; up to 8 wait in a
+queue; beyond that the owner answers `@attacherr|<id>|<b64("Ocupado, reintenta")>`.
+Received files: cache path `attachments_cache/<hex(SHA256(owner|id))[:24]>_<sanitized name>`;
+`.part` files are created exclusively (O_EXCL; a unique `<target>.<n>.part` on
+collision). The GUI hands a received file to the system shell ("Open") only
+when its local path has an extension matching its kind (image: png jpg jpeg
+gif bmp webp; video: mp4 mkv webm mov avi m4v); otherwise only "Save As" is
+offered, with a `SYSTEM:` warning.
+
+**Reconnects.** Fatal auth errors (bad server signature, missing AUTH_OK,
+`CLIENTE OBSOLETO`, banner without `PROTO=2`, unusable challenge) stay on screen
+until the user submits a new login, and the next reconnect waits 30 s (a new
+login ends the wait). `SYSTEM: TIEMPO DE AUTENTICACION AGOTADO.` and
+`SYSTEM: LIMITE DE TRAFICO EXCEDIDO.` are shown and the client waits 5 s
+before reconnecting. `PING` is only sent after a verified `AUTH_OK`.
+
 ## 5. Other
 
 - `PING`/`PONG` both directions unchanged.
@@ -201,13 +278,17 @@ Choices made where the text above leaves room; clients can rely on them.
   chars; otherwise `SYSTEM: CREDENCIALES INCORRECTAS.` (no challenge). The
   server nonce part is 32 lowercase hex chars. Only one challenge is pending
   per connection (a new `AUTH_START` replaces it) and it is single use: any
-  `AUTH_PROOF` consumes it, success or not. Lockouts (5 failures per user,
-  10 per origin = hwid, 5 min) are evaluated at `AUTH_PROOF` time, as in v1,
-  so a locked or unknown user still receives a challenge. `AUTH_START` /
+  `AUTH_PROOF` consumes it, success or not. There is no account lockout (see
+  **Login failure policy** below), so an unknown user still receives a
+  challenge and a valid proof is always accepted. `AUTH_START` /
   `AUTH_PROOF` are ignored once the connection is authenticated or waiting
   for `[CHANGE2]`.
 - **Fake challenge**: salt = first 16 bytes (32 hex) of
-  `HMAC-SHA256(per-process secret, "river-fake-salt|" + user)`, iter =
+  `HMAC-SHA256(secret, "river-fake-salt|" + user)`, where `secret` is 32
+  random bytes generated once and persisted in the database
+  (`server_settings`, key `fake_salt_secret`; this supersedes the
+  "per-process random secret" of §2), so fake salts survive restarts exactly
+  like real ones. iter =
   `scram::kDefaultIterations` (210000, same as every credential the server
   creates or migrates). A stored value that is not a valid `scram-sha256$`
   credential is treated like an unknown user.
@@ -222,11 +303,15 @@ Choices made where the text above leaves room; clients can rely on them.
   strictly ordered with respect to this block (none is lost or duplicated);
   other broadcasts (`KEY_CHANGED`, `ATTACH2`, `[USERS]`, announcements) may
   interleave anywhere, so clients must accept any line at any time.
-- **CHANGE2**: iter must be an unsigned decimal in
-  `[scram::kMinIterations (100000), scram::kMaxIterations]`; salt 16..64 bytes
+- **CHANGE2**: iter must be exactly `scram::kDefaultIterations` (210000;
+  supersedes "iter >= 100000" in §2.1 — any other value would make the
+  account's challenge distinguishable from a fake one); salt 16..64 bytes
   hex; storedKey/serverKey exactly 64 hex chars (upper case accepted, stored
-  lower case). Refused for admins and when the new name is taken. The renamed
-  account starts with no public key and no queued PMs.
+  lower case). Refused for admins, for reserved names and when the new name
+  is taken **in any letter case** (see **Usernames**). The renamed account
+  starts with no public key and no queued PMs. Failure answer:
+  `SYSTEM: ERROR ACTUALIZANDO USUARIO.` (the connection stays in first-login
+  state and may retry).
 - **KEY_SET**: the key must decode to exactly 32 bytes, else
   `SYSTEM: CLAVE PUBLICA RECHAZADA.` `KEY_CHANGED:<user>` is broadcast to all
   authenticated clients (sender included) whenever the stored value differs
@@ -235,6 +320,15 @@ Choices made where the text above leaves room; clients can rely on them.
   `SYSTEM: CLAVE PUBLICA REGISTRADA.`
 - **KEY_GET** for a name that is not a valid username answers `KEY:<name>:-`
   (silently ignored if the name contains `:`, `|` or control chars).
+  **Batch form**: `[KEY_GET]:<user1>,<user2>,...` (comma-separated, no
+  spaces, at most 50 names; names after the 50th are ignored, empty names are
+  skipped) is answered with one `KEY:<name>:<pubkeyB64>` / `KEY:<name>:-` line
+  per name, in request order (duplicates are answered each time). The single
+  form `[KEY_GET]:<user>` is simply a batch of one. KEY_GET has its own
+  budget of 600 names per minute and is **not** counted in the 120 lines/min
+  limit; names beyond the budget are not answered and the first excess in a
+  minute gets one `SYSTEM: LIMITE DE CONSULTAS DE CLAVES EXCEDIDO.` (the
+  connection stays open).
 - **Base64**: every b64 field is decoded strictly and relayed/stored
   re-encoded in canonical form.
 - **MSG**: invalid base64 or empty text → `SYSTEM: MENSAJE RECHAZADO.`;
@@ -247,7 +341,9 @@ Choices made where the text above leaves room; clients can rely on them.
   `IsValidUsername`, else `SYSTEM: MENSAJE PRIVADO RECHAZADO.` Delivered as
   `PM2:<from>:<ts>:<env>` / `PMX:<from>:<ts>:<env>`. Offline recipient:
   PM2 → queued (`SYSTEM: Mensaje privado en cola para <user>.`), or, at 200
-  queued for that recipient, `SYSTEM: Cola de mensajes privados llena para <user>.`
+  queued for that recipient — or at 50 queued for that recipient *from this
+  sender* (per-sender sub-quota, so one user cannot fill someone else's
+  queue) — `SYSTEM: Cola de mensajes privados llena para <user>.`
   (the new message is refused; older ones are kept). PMX →
   `SYSTEM: Usuario '<user>' no conectado.` Unknown recipient (both) →
   `SYSTEM: Usuario '<user>' no encontrado.` Queued PMs keep their original
@@ -263,9 +359,68 @@ Choices made where the text above leaves room; clients can rely on them.
   `SYSTEM: ADJUNTO RECHAZADO.` Framing is unchanged.
 - **Rate limits**: `MSG`, `PM2`, `PMX` share the 60/min message budget (admin
   commands sent as `MSG` count too); `ATTACH2` 12/min; chunks 1200/min; all
-  text lines 120/min.
+  text lines except `[KEY_GET]` (including empty lines, `PING`/`PONG` and
+  frames of unknown type) 120/min; KEY_GET 600 names/min (above). Every frame
+  of any type also counts toward 2400 frames/min. Exceeding the line or
+  frame budget → `SYSTEM: LIMITE DE TRAFICO EXCEDIDO.` and the connection is
+  closed.
 - **Migration** (`PRAGMA user_version` 1 → 2): every `pbkdf2-sha256$...` row is
   converted in the `InitSchema` transaction. A row that cannot be parsed is
   left untouched (logged; that account needs `/passwd`) instead of aborting
   startup. The credential column keeps its v1 name `password_hash`.
+  2 → 3: table `server_settings(key PK, value)` (fake-salt secret) and the
+  unique index `idx_users_username_nocase ON users(username COLLATE NOCASE)`.
+  If the database already holds names that differ only in case, they are
+  logged and kept (each still logs in with its exact name) and the index is
+  not created; the application-level case-insensitive check still prevents
+  new variants. Existing accounts with reserved names are logged.
 - `/whois <user>` appends `| huella=<fingerprint>` (or `huella=-`).
+- **Usernames**: unique ignoring ASCII case (`Alice` cannot be created while
+  `alice` exists). Login, PM routing, KEY_GET and admin commands still match
+  the exact stored spelling. Reserved (refused for `[CHANGE2]` and never
+  generated by `/newuser`), compared case-insensitively: `admin`, `system`,
+  `server` and the configured `THE_RIVER_ADMIN_USER`.
+- **Connection admission and deadlines**: at most 256 connections. A
+  connection is *pre-auth* until it receives `AUTH_OK`; at most 64 may be
+  pre-auth at once. When a new connection arrives and either cap is reached,
+  the **oldest pre-auth connection is closed** (no notice) to make room, so
+  pre-auth floods cannot lock out real logins; only when every slot is held
+  by authenticated/first-login connections is the newcomer refused with
+  `SYSTEM: SERVIDOR SATURADO. Intenta mas tarde.` Pre-auth connections must
+  get `AUTH_OK` within **30 s** of connecting, and first-login connections
+  must complete `[CHANGE2]` within **10 min** of `AUTH_OK`; otherwise the
+  server sends `SYSTEM: TIEMPO DE AUTENTICACION AGOTADO.` and closes
+  (enforced by the heartbeat thread, 1 s resolution). Before `AUTH_OK`:
+  `PING` is not answered, any non-text frame (attachment chunk or unknown
+  type) closes the connection, and at most 20 lines may be sent in total.
+  The server PINGs first-login connections every 30 s like authenticated
+  ones.
+- **Login failure policy** (replaces the v1-style lockouts): a valid proof is
+  **never** refused or delayed because of earlier failures (nobody can lock
+  out another account, the admin included). Failed proofs (wrong proof,
+  malformed/expired `AUTH_PROOF`, unknown user) are throttled instead:
+  (a) each connection may fail at most 3 proofs (`CREDENCIALES INCORRECTAS`,
+  `ACCESO BLOQUEADO` or `HWID NO RECONOCIDO`); the 3rd failure answer is
+  followed by closing the connection; (b) after 5 failed proof verifications for
+  one username (case-insensitive) within 15 min, every further failed answer
+  for that username is delayed by 1 s per extra failure (max 5 s);
+  (c) when more than 60 proofs fail server-wide in one minute, every failed
+  answer is delayed by at least 2 s. The per-username table is bounded
+  (4096 entries, least recently failed evicted first) and pruned of entries
+  idle for 15 min from the heartbeat. There is no origin/hwid-keyed lock
+  (the hwid is client-supplied). Banned-HWID and HWID-mismatch answers are
+  unchanged.
+- **/newuser**: creates the next free `userN` (skipping names taken in any
+  case). If `THE_RIVER_NEW_USER_PASSWORD` is **unset** (recommended; it is no
+  longer required), the account gets a random one-time initial password
+  (16 chars from `A-Z a-z 2-9` without `I O l o 0 1`) and only the requesting
+  admin connection receives
+  `SYSTEM: NUEVO USUARIO: userN / clave inicial: <password> (de un solo uso; ...)`;
+  the password is never logged, audited or shown again. If it is **set**
+  (legacy), every new account shares it, the reply stays
+  `SYSTEM: NUEVO USUARIO: userN / clave inicial definida por THE_RIVER_NEW_USER_PASSWORD`,
+  and the server logs a warning at startup.
+- Admin kicks/bans, session replacement and heartbeat reaping act on the
+  connection object captured under the session lock, never on a raw
+  descriptor, so a reused descriptor can never receive another
+  connection's kick.

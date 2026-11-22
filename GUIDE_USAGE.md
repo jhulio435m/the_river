@@ -55,7 +55,7 @@ La consola de administración habla el protocolo 2 y solo necesita `THE_RIVER_ON
 
 ### Comandos Disponibles:
 *   `/users`: Lista todos los usuarios conectados actualmente.
-*   `/newuser`: Genera un nuevo usuario (ej. `user1`, `user2`) con la contraseña por defecto del servidor.
+*   `/newuser`: Genera un nuevo usuario (ej. `user1`, `user2`) con una contraseña inicial aleatoria de un solo uso, distinta para cada cuenta. Solo se muestra en la respuesta al admin y no se vuelve a mostrar: entrégala al invitado por un canal privado (si se pierde, usa `/passwd`).
 *   `/passwd <usuario> <nueva_contraseña>`: Cambia la contraseña de un usuario específico.
 *   `/banhwid <hwid>`: Bloquea una máquina permanentemente.
 *   `/kick <usuario>`: Desconecta a un usuario a la fuerza.

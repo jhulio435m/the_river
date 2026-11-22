@@ -1,3 +1,5 @@
+// Tests rely on assert() side effects; keep them active in every build type.
+#undef NDEBUG
 // End-to-end test of the real server binary (protocol v2, PROTOCOL_V2.md).
 //
 // Usage: river_e2e_server_tests <path to the_river_server>
@@ -6,6 +8,7 @@
 // with SIGTERM and checks it exits 0.
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 
 #include "common/base64.h"
@@ -34,6 +37,7 @@ public:
             a.sin_port = htons(static_cast<uint16_t>(g_port));
             inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
             if (connect(sock_, (sockaddr*)&a, sizeof(a)) == 0) {
+                connectedAt_ = std::chrono::steady_clock::now();
                 reader_ = std::thread([this] { ReadLoop(); });
                 return true;
             }
@@ -79,6 +83,17 @@ public:
         std::unique_lock<std::mutex> lk(m_);
         return cv_.wait_for(lk, std::chrono::milliseconds(ms), [&] { return eof_; });
     }
+    bool IsClosed() {
+        std::lock_guard<std::mutex> lk(m_);
+        return eof_;
+    }
+    // Milliseconds between Connect() and the server closing the stream.
+    long long ClosedAfterMs() {
+        std::lock_guard<std::mutex> lk(m_);
+        return std::chrono::duration_cast<std::chrono::milliseconds>(eofAt_ - connectedAt_).count();
+    }
+    // Answer server PINGs automatically (default) or record them.
+    void SetAutoPong(bool on) { autoPong_ = on; }
 
 private:
     void ReadLoop() {
@@ -86,12 +101,13 @@ private:
             std::uint16_t t; std::string p;
             if (!RecvFrame(sock_, t, p, 2 * 1024 * 1024)) break;
             std::lock_guard<std::mutex> lk(m_);
-            if (t == kFrameTypeText && p == "PING") { SendFrame(sock_, kFrameTypeText, "PONG"); continue; }
+            if (autoPong_ && t == kFrameTypeText && p == "PING") { SendFrame(sock_, kFrameTypeText, "PONG"); continue; }
             q_.push_back({t, p});
             cv_.notify_all();
         }
         std::lock_guard<std::mutex> lk(m_);
         eof_ = true;
+        eofAt_ = std::chrono::steady_clock::now();
         cv_.notify_all();
     }
     int sock_ = -1;
@@ -100,6 +116,8 @@ private:
     std::condition_variable cv_;
     std::deque<Frame> q_;
     bool eof_ = false;
+    bool autoPong_ = true;
+    std::chrono::steady_clock::time_point connectedAt_{}, eofAt_{};
 };
 
 std::vector<std::string> Split(const std::string& s) {
@@ -152,6 +170,34 @@ std::string Change2(Conn& c, const std::string& newUser, const std::string& pass
     return "FAIL";
 }
 
+// [CHANGE2] whose iteration field is replaced by `iterText`.
+std::string Change2Iter(Conn& c, const std::string& newUser, const std::string& pass, const std::string& iterText) {
+    river::scram::Credential cr;
+    river::scram::MakeCredential(pass, cr);
+    c.Send("[CHANGE2]:" + newUser + ":" + cr.saltHex + ":" + iterText + ":" + cr.storedKeyHex + ":" + cr.serverKeyHex);
+    std::string line;
+    for (int i = 0; i < 50; ++i) {
+        if (c.Wait("SYSTEM: ACTUALIZADO.", 100)) return "OK";
+        if (c.Wait("SYSTEM: ERROR ACTUALIZANDO USUARIO.", 1)) return "ERROR";
+    }
+    return "TIMEOUT";
+}
+
+// "SYSTEM: NUEVO USUARIO: userN / clave inicial: <pw> (...)" -> name, password.
+bool NewUser(Conn& admin, std::string& name, std::string& password) {
+    admin.Send("[MSG]:" + b64::EncodeString("/newuser"));
+    std::string line;
+    if (!admin.Wait("SYSTEM: NUEVO USUARIO: ", line)) return false;
+    const std::string rest = line.substr(23);
+    name = rest.substr(0, rest.find(' '));
+    const std::string tag = " / clave inicial: ";
+    const std::size_t p = rest.find(tag);
+    if (p == std::string::npos) return false;
+    password = rest.substr(p + tag.size());
+    password = password.substr(0, password.find(' '));
+    return !name.empty() && password.size() >= 12;
+}
+
 std::string MsgText(const std::string& line, std::string* from = nullptr) {
     auto f = Split(line);
     if (f.size() != 4) return "<bad>";
@@ -164,13 +210,43 @@ void AppendU32(std::string& o, uint32_t v) { for (int s = 24; s >= 0; s -= 8) o.
 void AppendSized(std::string& o, const std::string& v) { AppendU16(o, (uint16_t)v.size()); o += v; }
 
 static void RunChecks() {
+    // ---- pre-auth slot flood: 70 idle unauthenticated connections ----
+    std::vector<std::unique_ptr<Conn>> idlers;
+    for (int i = 0; i < 70; ++i) {
+        idlers.push_back(std::make_unique<Conn>("idle" + std::to_string(i)));
+        idlers.back()->Connect();
+        idlers.back()->Wait("SYSTEM: UPLINK", 2000);
+    }
     // ---- admin ----
     Conn admin("admin");
     CHECK(admin.Connect(), "admin connects");
     CHECK(admin.Wait("SYSTEM: UPLINK ESTABLISHED. PROTO=2"), "banner has PROTO=2");
     bool sig = false;
-    CHECK(Login(admin, "admin", "admin-bootstrap-key", "hw-admin", &sig) == "OK", "admin login");
+    CHECK(Login(admin, "admin", "admin-bootstrap-key", "hw-admin", &sig) == "OK",
+          "admin login while 70 pre-auth connections are open (unauth cap evicts, never blocks)");
     CHECK(sig, "admin server signature verifies");
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        int closed = 0;
+        for (auto& c : idlers) closed += c->IsClosed() ? 1 : 0;
+        CHECK(closed >= 6 && idlers.front()->IsClosed(),
+              "oldest pre-auth connections evicted at the unauth cap (closed=" + std::to_string(closed) + ")");
+        idlers.clear();
+    }
+    // ---- pre-auth deadline (checked at the end): idle, never authenticates ----
+    Conn lazy("lazy");
+    lazy.SetAutoPong(false);
+    CHECK(lazy.Connect(), "lazy pre-auth connection");
+    lazy.Wait("SYSTEM: UPLINK");
+    {
+        Conn p("preauth-ping");
+        p.Connect();
+        p.Wait("SYSTEM: UPLINK");
+        p.Send("PING");
+        CHECK(!p.Wait("PONG", 600), "PING not answered before authentication");
+        p.SendBin(std::string(16, 'x'));
+        CHECK(p.Closed(), "binary frame before authentication closes the connection");
+    }
     {
         std::string s;
         CHECK(admin.Wait("SESSION:", s), "admin SESSION");
@@ -178,17 +254,17 @@ static void RunChecks() {
         CHECK(admin.Wait("HISTORY_END"), "admin history end");
     }
     admin.Drain();
-    admin.Send("[MSG]:" + b64::EncodeString("/newuser"));
-    CHECK(admin.Wait("SYSTEM: NUEVO USUARIO: user1"), "/newuser user1");
-    admin.Send("[MSG]:" + b64::EncodeString("/newuser"));
-    CHECK(admin.Wait("SYSTEM: NUEVO USUARIO: user2"), "/newuser user2");
+    std::string u1, p1, u2, p2, u3, p3;
+    CHECK(NewUser(admin, u1, p1) && u1 == "user1", "/newuser user1 with random initial password");
+    CHECK(NewUser(admin, u2, p2) && u2 == "user2", "/newuser user2 with random initial password");
+    CHECK(p1 != p2 && p1 != "initial-user-key", "initial passwords differ per account");
 
     // ---- alice first login ----
     Conn a("alice");
     a.Connect();
     a.Wait("SYSTEM: UPLINK");
     sig = false;
-    CHECK(Login(a, "user1", "initial-user-key", "hw-alice", &sig) == "FIRST", "user1 first login");
+    CHECK(Login(a, "user1", p1, "hw-alice", &sig) == "FIRST", "user1 first login");
     CHECK(sig, "first-login AUTH_OK signature verifies");
     CHECK(Change2(a, "alice", "alice-strong-key-1") == "OK", "CHANGE2 -> alice");
     {
@@ -214,7 +290,9 @@ static void RunChecks() {
     // ---- bob first login ----
     Conn b("bob");
     b.Connect();
-    CHECK(Login(b, "user2", "initial-user-key", "hw-bob") == "FIRST", "user2 first login");
+    CHECK(Login(b, "user2", p1, "hw-bob") == "SYSTEM: CREDENCIALES INCORRECTAS.",
+          "user1's initial password does not open user2");
+    CHECK(Login(b, "user2", p2, "hw-bob") == "FIRST", "user2 first login with its own password");
     CHECK(Change2(b, "bob", "bob-strong-key-22") == "OK", "CHANGE2 -> bob");
     b.Send("[KEY_SET]:" + b64::EncodeString(kb.pub32));
     CHECK(b.Wait("SYSTEM: CLAVE PUBLICA REGISTRADA."), "bob KEY_SET");
@@ -228,6 +306,27 @@ static void RunChecks() {
     CHECK(a.Wait("KEY:nobody:", line) && line == "KEY:nobody:-", "KEY_GET unknown -> -");
     a.Send("[KEY_GET]:admin");
     CHECK(a.Wait("KEY:admin:", line) && line == "KEY:admin:-", "KEY_GET user without key -> -");
+    {
+        // Batch form: one KEY: line per name, in order.
+        a.Drain();
+        a.Send("[KEY_GET]:bob,nobody,admin,alice");
+        std::vector<std::string> keys;
+        for (int i = 0; i < 4; ++i) if (a.Wait("KEY:", line)) keys.push_back(line);
+        CHECK(keys.size() == 4 && keys[0] == "KEY:bob:" + b64::EncodeString(kb.pub32) && keys[1] == "KEY:nobody:-" &&
+                  keys[2] == "KEY:admin:-" && keys[3] == "KEY:alice:" + b64::EncodeString(ka.pub32),
+              "batch KEY_GET answers each name in order");
+        std::string many;
+        for (int i = 0; i < 60; ++i) many += (i ? "," : "") + std::string("peer") + std::to_string(i);
+        a.Send("[KEY_GET]:" + many);
+        int got = 0;
+        while (a.Wait("KEY:peer", line, 500)) ++got;
+        CHECK(got == 50, "batch KEY_GET capped at 50 names (got " + std::to_string(got) + ")");
+        // 130 single KEY_GET lines: own budget, not the 120 lines/min limit.
+        for (int i = 0; i < 130; ++i) a.Send("[KEY_GET]:offline" + std::to_string(i));
+        got = 0;
+        while (got < 130 && a.Wait("KEY:offline", line, 2000)) ++got;
+        CHECK(got == 130 && !a.IsClosed(), "130 KEY_GET lines answered without hitting the line limit");
+    }
 
     // ---- room ----
     a.Drain();
@@ -351,6 +450,37 @@ static void RunChecks() {
     admin.Send("[MSG]:" + b64::EncodeString("/passwd bob bob-new-strong-key"));
     CHECK(admin.Wait("SYSTEM: Clave actualizada para bob"), "/passwd bob");
 
+    // ---- CHANGE2 hardening: reserved / case-variant names, iterations ----
+    CHECK(NewUser(admin, u3, p3), "/newuser user3");
+    {
+        Conn c("carol");
+        c.Connect();
+        CHECK(Login(c, u3, p3, "hw-carol") == "FIRST", "user3 first login");
+        for (const char* bad : {"ADMIN", "Admin", "SYSTEM", "server", "ALICE"})
+            CHECK(Change2Iter(c, bad, "carol-strong-key-1", "210000") == "ERROR",
+                  std::string("CHANGE2 to '") + bad + "' refused");
+        CHECK(Change2Iter(c, "carol", "carol-strong-key-1", "300000") == "ERROR", "CHANGE2 iter 300000 refused");
+        CHECK(Change2Iter(c, "carol", "carol-strong-key-1", "100000") == "ERROR", "CHANGE2 iter 100000 refused");
+        CHECK(Change2Iter(c, "carol", "carol-strong-key-1", "210000") == "OK", "CHANGE2 carol with default iter");
+    }
+    {
+        // Failed proofs never lock the account: 6 bad proofs for admin from two
+        // other connections (each closed after 3), then a correct login works.
+        int closedAfter3 = 0;
+        for (int round = 0; round < 2; ++round) {
+            Conn x("guesser" + std::to_string(round));
+            x.Connect();
+            x.Wait("SYSTEM: UPLINK");
+            for (int i = 0; i < 3; ++i) Login(x, "admin", "wrong-guess-" + std::to_string(i), "hw-g");
+            if (x.Closed(4000)) ++closedAfter3;
+        }
+        CHECK(closedAfter3 == 2, "connection closed after 3 failed proofs");
+        Conn ok("admin-again");
+        ok.Connect();
+        CHECK(Login(ok, "admin", "admin-bootstrap-key", "hw-admin") == "OK",
+              "correct admin proof accepted after 6 bad proofs from other connections");
+    }
+
     // ---- failures ----
     {
         Conn v1("v1");
@@ -389,6 +519,16 @@ static void RunChecks() {
         CHECK(Login(n, "bob", "bob-new-strong-key", "hw-bob") == "OK", "login with /passwd key");
     }
 
+    // ---- pre-auth deadline ----
+    {
+        std::string notice;
+        const bool got = lazy.Wait("SYSTEM: TIEMPO DE AUTENTICACION AGOTADO.", notice, 40000);
+        const bool closed = lazy.Closed(5000);
+        const long long after = lazy.ClosedAfterMs();
+        CHECK(got && closed && after >= 29000 && after <= 36000,
+              "unauthenticated connection closed at the 30 s deadline (after " + std::to_string(after) + " ms)");
+    }
+
 }
 
 int main(int argc, char** argv) {
@@ -403,11 +543,11 @@ int main(int argc, char** argv) {
     opt.argv = {e2e::AbsolutePath(argv[1])};
     opt.cwd = dir;
     opt.stdoutFile = dir + "/server.out";
-    opt.unsetEnv = {"THE_RIVER_ADMIN_USER", "THE_RIVER_ONION", "THE_RIVER_MACHINE_ID"};
+    // No THE_RIVER_NEW_USER_PASSWORD: /newuser generates per-account passwords.
+    opt.unsetEnv = {"THE_RIVER_ADMIN_USER", "THE_RIVER_ONION", "THE_RIVER_MACHINE_ID", "THE_RIVER_NEW_USER_PASSWORD"};
     opt.setEnv = {
         {"THE_RIVER_AES_KEY", "e2e-test-key-with-plenty-of-entropy-123"},
         {"THE_RIVER_ADMIN_BOOTSTRAP_PASSWORD", "admin-bootstrap-key"},
-        {"THE_RIVER_NEW_USER_PASSWORD", "initial-user-key"},
         {"THE_RIVER_DB", dir + "/t.db"},
         {"THE_RIVER_LOG", dir + "/chat.log"},
         {"THE_RIVER_BIND_ADDR", "127.0.0.1"},

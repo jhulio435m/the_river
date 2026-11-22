@@ -1,3 +1,5 @@
+// Tests rely on assert() side effects; keep them active in every build type.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +50,23 @@ bool ScramLoginSucceeds(UserRepository& repo, const std::string& user, const std
                                                river::scram::ServerSignature(credential, authMessage));
 }
 
+// Legacy mode (THE_RIVER_NEW_USER_PASSWORD set): no per-account password.
+bool CreateUser(UserRepository& repo, std::string& username) {
+    std::string initial;
+    const bool ok = repo.CreateNextUser(username, initial);
+    return ok && initial.empty();
+}
+
+bool MakeParts(const std::string& password, river::scram::Credential& out) {
+    return river::scram::MakeCredential(password, out);
+}
+
+bool Rename(UserRepository& repo, const std::string& from, const std::string& to, const std::string& password) {
+    river::scram::Credential c;
+    if (!MakeParts(password, c)) return false;
+    return repo.CompleteFirstLoginWithCredential(from, to, c.iterations, c.saltHex, c.storedKeyHex, c.serverKeyHex);
+}
+
 std::string StoredCredentialString(const std::string& dbPath, const std::string& user) {
     sqlite3* db = nullptr;
     assert(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
@@ -78,7 +97,7 @@ void TestUserRepositoryLifecycle() {
     assert(!ScramLoginSucceeds(repo, "admin", "wrong-bootstrap-key"));
 
     std::string username;
-    assert(repo.CreateNextUser(username));
+    assert(CreateUser(repo, username));
     assert(!username.empty());
     assert(repo.UserExists(username));
     assert(ScramLoginSucceeds(repo, username, "initial-user-key"));
@@ -140,7 +159,7 @@ void TestUserRepositoryLifecycle() {
     assert(repo.ListBannedHwids().empty());
 
     std::string second;
-    assert(repo.CreateNextUser(second));
+    assert(CreateUser(repo, second));
     const std::vector<UserSummary> users = repo.ListUsers();
     assert(users.size() == 3);
     bool sawAdmin = false;
@@ -247,8 +266,8 @@ void TestKeysHistoryAndOfflinePms() {
 
     std::string alice;
     std::string bob;
-    assert(repo.CreateNextUser(alice));
-    assert(repo.CreateNextUser(bob));
+    assert(CreateUser(repo, alice));
+    assert(CreateUser(repo, bob));
 
     // Keys.
     std::string got;
@@ -300,8 +319,12 @@ void TestKeysHistoryAndOfflinePms() {
     const std::string env = river::base64::EncodeString(std::string(80, 'e'));
     assert(repo.QueueOfflinePm(bob, alice, now - UserRepository::kOfflinePmTtlSeconds - 60, env) ==
            OfflineQueueResult::Queued);  // already expired
+    // (Several senders: one sender may only hold 50 of the 200 slots.)
     for (int i = 0; i < UserRepository::kOfflinePmPerRecipient; ++i) {
-        assert(repo.QueueOfflinePm(bob, alice, now + i, env) == OfflineQueueResult::Queued);
+        const std::string from = i < UserRepository::kOfflinePmPerSenderPerRecipient
+                                     ? alice
+                                     : "sender" + std::to_string(i / UserRepository::kOfflinePmPerSenderPerRecipient);
+        assert(repo.QueueOfflinePm(bob, from, now + i, env) == OfflineQueueResult::Queued);
     }
     // Expired row was pruned on insert, so exactly 200 are live.
     assert(repo.CountOfflinePms(bob) == 200);
@@ -333,7 +356,7 @@ void TestKeysHistoryAndOfflinePms() {
 
     // A first-login rename starts with no key and no queued PMs.
     std::string carol;
-    assert(repo.CreateNextUser(carol));
+    assert(CreateUser(repo, carol));
     assert(repo.SetUserKey(carol, key2) == KeySetResult::Changed);
     assert(repo.QueueOfflinePm(carol, bob, now, env) == OfflineQueueResult::Queued);
     river::scram::Credential cred;
@@ -348,6 +371,206 @@ void TestKeysHistoryAndOfflinePms() {
     std::remove(dbPath.c_str());
 }
 
+// Usernames are unique ignoring ASCII case; reserved names cannot be taken.
+void TestCaseInsensitiveAndReservedNames() {
+    const std::string dbPath = TempDbPath();
+    UserRepository repo;
+    assert(repo.Open(dbPath));
+    assert(repo.InitSchema());
+
+    std::string u1, u2, u3;
+    assert(CreateUser(repo, u1));
+    assert(CreateUser(repo, u2));
+    assert(CreateUser(repo, u3));
+    assert(repo.UsernameTaken("ADMIN") && repo.UsernameTaken("Admin") && repo.UsernameTaken(u1));
+    assert(!repo.UsernameTaken("nobody-here"));
+
+    for (const char* name : {"ADMIN", "Admin", "aDmIn", "SYSTEM", "system", "Server", "SERVER"}) {
+        assert(UserRepository::IsReservedUsername(name));
+        assert(!Rename(repo, u1, name, "reserved-name-key-1"));
+    }
+    assert(!UserRepository::IsReservedUsername("alice"));
+    assert(repo.UserExists(u1));
+
+    assert(Rename(repo, u1, "alice", "alice-strong-key-1"));
+    // Case variants of an existing name are refused.
+    assert(!Rename(repo, u2, "ALICE", "other-strong-key-2"));
+    assert(!Rename(repo, u2, "Alice", "other-strong-key-2"));
+    assert(repo.UserExists(u2) && !repo.UserExists("Alice"));
+    assert(Rename(repo, u2, "bob", "bob-strong-key-22"));
+
+    // Non-default iteration counts are refused (fake challenges always say
+    // kDefaultIterations, so a custom count would reveal the account).
+    {
+        river::scram::Credential c;
+        assert(MakeParts("carol-strong-key-3", c));
+        river::scram::Credential custom;
+        assert(river::scram::CredentialFromParts(300000, c.saltHex, c.storedKeyHex, c.serverKeyHex, custom));
+        assert(!repo.CompleteFirstLoginWithCredential(u3, "carol", 300000, c.saltHex, c.storedKeyHex,
+                                                      c.serverKeyHex));
+        assert(!repo.CompleteFirstLoginWithCredential(u3, "carol", river::scram::kMinIterations, c.saltHex,
+                                                      c.storedKeyHex, c.serverKeyHex));
+        assert(repo.UserExists(u3));
+    }
+
+    // The unique index enforces it at the SQL level too.
+    {
+        sqlite3* db = nullptr;
+        assert(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
+        assert(sqlite3_exec(db, "INSERT INTO users (username, password_hash) VALUES ('BOB', 'x');", nullptr, nullptr,
+                            nullptr) != SQLITE_OK);
+        sqlite3_close(db);
+    }
+
+    // /newuser skips a sequential name taken in another case.
+    {
+        sqlite3* db = nullptr;
+        assert(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
+        assert(sqlite3_exec(db, "UPDATE users SET username='USER4' WHERE username='bob';", nullptr, nullptr,
+                            nullptr) == SQLITE_OK);
+        sqlite3_close(db);
+    }
+    std::string next;
+    assert(CreateUser(repo, next));
+    assert(next != "user4" && next.rfind("user", 0) == 0);
+    repo.Close();
+    std::remove(dbPath.c_str());
+}
+
+// A database that already has case-duplicate names still starts (logged).
+void TestCaseDuplicateMigration() {
+    const std::string dbPath = TempDbPath();
+    {
+        sqlite3* db = nullptr;
+        assert(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
+        assert(sqlite3_exec(db,
+                            "CREATE TABLE users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL,"
+                            "first_login INTEGER DEFAULT 1, hwid TEXT, is_admin INTEGER DEFAULT 0);"
+                            "CREATE TABLE banned_hwids (hwid TEXT PRIMARY KEY, reason TEXT, banned_at INTEGER);"
+                            "PRAGMA user_version = 2;",
+                            nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(db);
+    }
+    river::scram::Credential c;
+    assert(MakeParts("dup-user-strong-key", c));
+    const std::string cred = river::scram::Serialize(c);
+    {
+        sqlite3* db = nullptr;
+        assert(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
+        for (const char* name : {"dave", "Dave", "SYSTEM"}) {
+            sqlite3_stmt* st = nullptr;
+            assert(sqlite3_prepare_v2(db, "INSERT INTO users (username, password_hash, first_login) VALUES (?, ?, 0);",
+                                      -1, &st, nullptr) == SQLITE_OK);
+            sqlite3_bind_text(st, 1, name, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(st, 2, cred.c_str(), -1, SQLITE_TRANSIENT);
+            assert(sqlite3_step(st) == SQLITE_DONE);
+            sqlite3_finalize(st);
+        }
+        sqlite3_close(db);
+    }
+    UserRepository repo;
+    assert(repo.Open(dbPath));
+    assert(repo.InitSchema());  // logs the duplicates, does not fail
+    assert(repo.UserExists("dave") && repo.UserExists("Dave"));
+    assert(ScramLoginSucceeds(repo, "dave", "dup-user-strong-key"));
+    assert(ScramLoginSucceeds(repo, "Dave", "dup-user-strong-key"));
+    // No further variant can be added even without the unique index.
+    std::string u;
+    assert(CreateUser(repo, u));
+    assert(!Rename(repo, u, "DAVE", "another-strong-key"));
+    assert(repo.InitSchema());  // idempotent
+    repo.Close();
+    std::remove(dbPath.c_str());
+}
+
+// The fake-salt secret is generated once and persisted in the database.
+void TestFakeSaltSecretPersisted() {
+    const std::string dbPath = TempDbPath();
+    std::string first;
+    {
+        UserRepository repo;
+        assert(repo.FakeSaltSecret().empty());
+        assert(repo.Open(dbPath));
+        assert(repo.InitSchema());
+        first = repo.FakeSaltSecret();
+        assert(first.size() == 64 && river::scram::IsHexString(first, 64));
+        assert(repo.InitSchema());
+        assert(repo.FakeSaltSecret() == first);
+        repo.Close();
+    }
+    {
+        UserRepository repo;  // "restart"
+        assert(repo.Open(dbPath));
+        assert(repo.InitSchema());
+        assert(repo.FakeSaltSecret() == first);
+        repo.Close();
+    }
+    const std::string other = TempDbPath();
+    {
+        UserRepository repo;
+        assert(repo.Open(other));
+        assert(repo.InitSchema());
+        assert(repo.FakeSaltSecret() != first);  // per database, random
+        repo.Close();
+    }
+    std::remove(dbPath.c_str());
+    std::remove(other.c_str());
+}
+
+// One sender may hold at most 50 of a recipient's 200 offline slots.
+void TestOfflinePmPerSenderQuota() {
+    const std::string dbPath = TempDbPath();
+    UserRepository repo;
+    assert(repo.Open(dbPath));
+    assert(repo.InitSchema());
+    const long long now = static_cast<long long>(time(nullptr));
+    const std::string env = river::base64::EncodeString(std::string(80, 'e'));
+    for (int i = 0; i < UserRepository::kOfflinePmPerSenderPerRecipient; ++i)
+        assert(repo.QueueOfflinePm("victim", "spammer", now, env) == OfflineQueueResult::Queued);
+    assert(repo.QueueOfflinePm("victim", "spammer", now, env) == OfflineQueueResult::SenderQuota);
+    // Others can still reach the victim, and the spammer can reach others.
+    assert(repo.QueueOfflinePm("victim", "friend", now, env) == OfflineQueueResult::Queued);
+    assert(repo.QueueOfflinePm("someone", "spammer", now, env) == OfflineQueueResult::Queued);
+    // The total cap still applies.
+    for (int s = 0; s < 3; ++s)
+        for (int i = 0; i < 50; ++i)
+            repo.QueueOfflinePm("victim", "sender" + std::to_string(s), now, env);
+    assert(repo.CountOfflinePms("victim") == UserRepository::kOfflinePmPerRecipient);
+    assert(repo.QueueOfflinePm("victim", "late", now, env) == OfflineQueueResult::Full);
+    // Once delivered, the quota is free again.
+    assert(repo.TakeOfflinePms("victim").size() == 200);
+    assert(repo.QueueOfflinePm("victim", "spammer", now, env) == OfflineQueueResult::Queued);
+    repo.Close();
+    std::remove(dbPath.c_str());
+}
+
+// Without THE_RIVER_NEW_USER_PASSWORD every /newuser account gets its own
+// random one-time password that works for that account only.
+void TestRandomInitialPasswords() {
+    unsetenv("THE_RIVER_NEW_USER_PASSWORD");
+    const std::string dbPath = TempDbPath();
+    UserRepository repo;
+    assert(repo.Open(dbPath));
+    assert(repo.InitSchema());
+    std::string u1, p1, u2, p2;
+    assert(repo.CreateNextUser(u1, p1));
+    assert(repo.CreateNextUser(u2, p2));
+    assert(u1 != u2);
+    assert(static_cast<int>(p1.size()) == UserRepository::kInitialPasswordChars && IsStrongEnoughPassword(p1));
+    assert(IsStrongEnoughPassword(p2) && p1 != p2);
+    for (char c : p1) assert(std::string("0O1lIo").find(c) == std::string::npos);
+    assert(ScramLoginSucceeds(repo, u1, p1));
+    assert(ScramLoginSucceeds(repo, u2, p2));
+    assert(!ScramLoginSucceeds(repo, u1, p2));
+    assert(!ScramLoginSucceeds(repo, u2, p1));
+    assert(!ScramLoginSucceeds(repo, u1, "initial-user-key"));
+    // Not stored in clear.
+    assert(StoredCredentialString(dbPath, u1).find(p1) == std::string::npos);
+    repo.Close();
+    std::remove(dbPath.c_str());
+    setenv("THE_RIVER_NEW_USER_PASSWORD", "initial-user-key", 1);
+}
+
 }  // namespace
 
 int main() {
@@ -355,6 +578,11 @@ int main() {
     TestUserRepositoryLifecycle();
     TestV1Migration();
     TestKeysHistoryAndOfflinePms();
+    TestCaseInsensitiveAndReservedNames();
+    TestCaseDuplicateMigration();
+    TestFakeSaltSecretPersisted();
+    TestOfflinePmPerSenderQuota();
+    TestRandomInitialPasswords();
     std::cout << "integration tests OK" << std::endl;
     return 0;
 }

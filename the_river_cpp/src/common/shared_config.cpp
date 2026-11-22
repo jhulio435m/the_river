@@ -147,10 +147,12 @@ bool HasRequiredClientConfig() {
            onion.find_first_of(" \t\r\n") == std::string::npos;
 }
 
+// THE_RIVER_NEW_USER_PASSWORD is optional: without it /newuser generates a
+// random one-time initial password per account (recommended); with it every
+// new account gets that shared password (legacy mode).
 bool HasRequiredServerConfig() {
     return IsEncryptionKeyStrong(EncryptionKey()) &&
-           !AdminDefaultPassword().empty() &&
-           !DefaultUserPassword().empty();
+           !AdminDefaultPassword().empty();
 }
 
 }  // namespace river

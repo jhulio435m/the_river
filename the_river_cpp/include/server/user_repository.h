@@ -44,17 +44,24 @@ struct OfflinePm {
     std::string envelopeB64;
 };
 
-enum class OfflineQueueResult { Queued, Full, Error };
+// Full: the recipient already has kOfflinePmPerRecipient queued.
+// SenderQuota: this sender already has kOfflinePmPerSenderPerRecipient queued
+// for that recipient (one sender cannot fill someone else's whole queue).
+enum class OfflineQueueResult { Queued, Full, SenderQuota, Error };
 enum class KeySetResult { Unchanged, Changed, Error };
 
 class UserRepository {
 public:
     // PROTOCOL_V2.md: room history keeps 500 rows, login replays 100,
-    // offline PMs: 200 per recipient, 7 day TTL.
-    static constexpr int kSchemaVersion = 2;
+    // offline PMs: 200 per recipient (at most 50 of them from one sender),
+    // 7 day TTL. Schema 3: server_settings table, case-insensitive usernames.
+    static constexpr int kSchemaVersion = 3;
     static constexpr int kRoomHistoryKeep = 500;
     static constexpr int kRoomHistoryReplay = 100;
     static constexpr int kOfflinePmPerRecipient = 200;
+    static constexpr int kOfflinePmPerSenderPerRecipient = 50;
+    // Length of the random one-time initial password made by /newuser.
+    static constexpr int kInitialPasswordChars = 16;
     static constexpr long long kOfflinePmTtlSeconds = 7LL * 24 * 3600;
 
     UserRepository() = default;
@@ -69,12 +76,27 @@ public:
     bool IsHwidBanned(const std::string& hwid);
     bool BanHwid(const std::string& hwid, const std::string& reason);
     bool UnbanHwid(const std::string& hwid);
-    bool CreateNextUser(std::string& createdUsername);
+    // Creates the next free "userN" account (first_login=1). With
+    // THE_RIVER_NEW_USER_PASSWORD set (legacy mode) every new account gets
+    // that shared password and initialPassword is returned empty; otherwise a
+    // random one-time password (kInitialPasswordChars, unambiguous alphabet)
+    // is generated, stored only as a SCRAM credential and returned once.
+    bool CreateNextUser(std::string& createdUsername, std::string& initialPassword);
+    // Names nobody may take (CHANGE2 / newuser), compared case-insensitively:
+    // "admin", "system", "server" and the configured admin username.
+    static bool IsReservedUsername(const std::string& username);
+    // True if an account whose name equals `username` ignoring ASCII case exists.
+    bool UsernameTaken(const std::string& username);
+    // Persistent secret for fake challenge salts (generated once, stored in
+    // server_settings). Empty before InitSchema succeeded.
+    std::string FakeSaltSecret();
     // Stores a fresh SCRAM credential derived from newPassword (admin /passwd).
     bool ResetUserPassword(const std::string& username, const std::string& newPassword);
     // [CHANGE2]: validates the parts with scram::CredentialFromParts, stores
     // them, clears first_login and renames oldUsername -> newUsername.
-    // Refused for admins and when newUsername is taken by another account.
+    // Refused for admins, when iterations != scram::kDefaultIterations, when
+    // newUsername is reserved, or when another account already has that name
+    // in any letter case.
     bool CompleteFirstLoginWithCredential(const std::string& oldUsername,
                                           const std::string& newUsername,
                                           int iterations,
@@ -116,9 +138,13 @@ private:
     bool EnsureDefaultAdminLocked();
     bool MigrateV1CredentialsLocked();
     bool UserExistsLocked(const std::string& username);
+    bool UsernameTakenLocked(const std::string& username, const std::string& exceptExact);
+    bool EnsureSettingsLocked();
+    bool EnsureCaseInsensitiveUsernamesLocked();
     bool PruneExpiredOfflinePmsLocked();
     std::string NextSequentialUsernameLocked();
 
     sqlite3* db_ = nullptr;
+    std::string fakeSaltSecret_;
     std::mutex mutex_;
 };

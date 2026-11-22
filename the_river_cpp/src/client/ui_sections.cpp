@@ -467,8 +467,37 @@ void ResetAttachmentModal(ClientUiState& uiState) {
     ReleaseImagePreviewTexture(uiState.attachmentPreviewTexture);
 }
 
+// Only our own offers, or received images/videos with a matching allowlisted
+// extension, may be handed to the system shell: the kind and name of a
+// received file are chosen by its sender.
+bool CanOpenWithShell(const ChatState& state, const AttachmentPayload& attachment) {
+    if (attachment.localPath.empty()) return false;
+    if (attachment.ownerUser == state.CurrentIdentity()) return true;
+    return IsAttachmentSafeToOpen(attachment.kind, attachment.localPath);
+}
+
+void CopyReceivedAttachmentAs(ChatState& state, const AttachmentPayload& attachment) {
+    state.AddSystemLog("SYSTEM: [!] " + attachment.displayName +
+                       " no se abre desde el chat (tipo o extension no permitidos). Guardalo y revisalo antes de ejecutarlo.");
+    std::string savePath;
+    std::string saveError;
+    if (!PickAttachmentSavePath(attachment, savePath, saveError)) {
+        if (!saveError.empty()) state.AddSystemLog("SYSTEM: " + saveError);
+        return;
+    }
+    if (!CopyFileBinary(attachment.localPath, savePath, saveError)) {
+        state.AddSystemLog("SYSTEM: " + saveError);
+    } else {
+        state.AddSystemLog("SYSTEM: Attachment saved to " + savePath);
+    }
+}
+
 void SaveAttachmentAs(ChatClient& client, ChatState& state, const AttachmentPayload& attachment) {
     if (!attachment.localPath.empty()) {
+        if (!CanOpenWithShell(state, attachment)) {
+            CopyReceivedAttachmentAs(state, attachment);
+            return;
+        }
         if (!OpenPathWithShell(attachment.localPath))
             state.AddSystemLog("SYSTEM: Could not open the local file.");
         return;
@@ -559,17 +588,23 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
             } else {
                 uiState.attachmentModalError = previewError;
             }
-        } else {
+        } else if (CanOpenWithShell(state, attachment)) {
             ImGui::TextWrapped("%s",
                                Tr(uiState,
                                   "Video ready. Use Open to launch it with the system player.",
                                   "Video listo. Usa Abrir para iniciarlo con el reproductor del sistema."));
+        } else {
+            ImGui::TextWrapped("%s",
+                               Tr(uiState,
+                                  "This file does not have an allowed video extension and will not be opened. Use Save As.",
+                                  "Este archivo no tiene una extension de video permitida y no se abrira. Usa Guardar como."));
         }
 
         ImGui::Spacing();
         if (isRemoteAttachment && attachment.kind != AttachmentKind::File) {
             if (ImGui::Button(Tr(uiState, "Preview", "Previsualizar"), ImVec2(110, 0))) {
-                const std::string previewPath = BuildAttachmentCachePath(attachment.id, attachment.displayName);
+                const std::string previewPath =
+                    BuildAttachmentCachePath(attachment.ownerUser, attachment.id, attachment.displayName);
                 if (!client.RequestAttachment(attachment, previewPath, "preview"))
                     uiState.attachmentModalError = state.LastError().empty()
                         ? Tr(uiState,
@@ -579,7 +614,7 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
             }
             ImGui::SameLine();
         }
-        if (attachment.kind != AttachmentKind::File && !attachment.localPath.empty()) {
+        if (attachment.kind != AttachmentKind::File && CanOpenWithShell(state, attachment)) {
             if (ImGui::Button(Tr(uiState, "Open", "Abrir"), ImVec2(110, 0))) {
                 if (!OpenPathWithShell(attachment.localPath))
                     uiState.attachmentModalError =

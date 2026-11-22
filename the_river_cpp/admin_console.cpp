@@ -12,6 +12,7 @@
 #include <unistd.h>
 #endif
 
+#include "client/terminal_sanitize.h"
 #include "common/base64.h"
 #include "common/scram.h"
 #include "common/security_utils.h"
@@ -73,10 +74,16 @@ std::vector<std::string> SplitWhitespace(const std::string& input) {
     return parts;
 }
 
+// Everything printed from the network goes through Safe(): no terminal escape
+// sequences (OSC 52 clipboard, cursor moves, fake prompts) reach the admin.
+std::string Safe(const std::string& text) {
+    return river::SanitizeForTerminal(text);
+}
+
 std::string DecodeTextB64(const std::string& payload) {
     std::string plain;
     if (!river::base64::DecodeToString(payload, plain)) return "[mensaje ilegible]";
-    return plain;
+    return Safe(plain);
 }
 
 // "<from>:<unixTs>:<payload>" (after "MSG:", "HIST:", "PM2:").
@@ -216,7 +223,7 @@ bool AuthenticateV2(SocketHandle sock, const std::string& user, const std::strin
         }
         if (IsNotice(line, "CREDENCIALES INCORRECTAS") || IsNotice(line, "ACCESO BLOQUEADO") ||
             IsNotice(line, "HWID NO RECONOCIDO") || IsNotice(line, "CLIENTE OBSOLETO")) {
-            Fatal(line);
+            Fatal(Safe(line));
             return false;
         }
     }
@@ -292,11 +299,11 @@ void ReceiverLoop(SocketHandle sock) {
         std::string payload;
         if ((line.rfind("MSG:", 0) == 0 && SplitSenderTsPayload(line.substr(4), from, payload)) ||
             (line.rfind("HIST:", 0) == 0 && SplitSenderTsPayload(line.substr(5), from, payload))) {
-            std::cout << "\033[1;36m[" << from << "]:\033[0m " << DecodeTextB64(payload);
+            std::cout << "\033[1;36m[" << Safe(from) << "]:\033[0m " << DecodeTextB64(payload);
             PrintPrompt();
         } else if (line.rfind("PM2:", 0) == 0 && SplitSenderTsPayload(line.substr(4), from, payload)) {
             // End-to-end encrypted for the GUI client's identity key: unreadable here.
-            std::cout << "\033[1;33m[PM cifrado de " << from << "]\033[0m";
+            std::cout << "\033[1;33m[PM cifrado de " << Safe(from) << "]\033[0m";
             PrintPrompt();
         } else if (line.rfind("ATTACH2:", 0) == 0) {
             std::vector<std::string> parts;
@@ -307,13 +314,14 @@ void ReceiverLoop(SocketHandle sock) {
             }
             std::string name;
             if (parts.size() >= 4) name = DecodeTextB64(parts[3]);
-            std::cout << "\033[1;36m[" << (parts.empty() ? std::string("?") : parts[0]) << "]:\033[0m [adjunto] " << name;
+            std::cout << "\033[1;36m[" << (parts.empty() ? std::string("?") : Safe(parts[0])) << "]:\033[0m [adjunto] "
+                      << name;
             PrintPrompt();
         } else if (line.find("SYSTEM") != std::string::npos) {
-            std::cout << "\033[1;31m" << line << "\033[0m";
+            std::cout << "\033[1;31m" << Safe(line) << "\033[0m";
             PrintPrompt();
         } else {
-            std::cout << line;
+            std::cout << Safe(line);
             PrintPrompt();
         }
     }

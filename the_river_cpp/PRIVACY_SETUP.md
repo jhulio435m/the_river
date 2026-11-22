@@ -13,8 +13,9 @@ Required for server bootstrap:
 ```bash
 export THE_RIVER_AES_KEY="<clave-aleatoria-de-32+-caracteres>"   # server only, e.g. $(openssl rand -hex 32)
 export THE_RIVER_ADMIN_BOOTSTRAP_PASSWORD="replace-before-first-run"
-export THE_RIVER_NEW_USER_PASSWORD="single-use-initial-password"
 ```
+
+`THE_RIVER_NEW_USER_PASSWORD` is no longer required. Without it (recommended) `/newuser` generates a random one-time initial password for each new account (16 characters, no look-alike characters) and shows it **only** in the reply to the admin who ran the command; it is never logged and cannot be shown again (use `/passwd <user> <key>` if it is lost). Hand each password to its invitee over a private channel. If you still set `THE_RIVER_NEW_USER_PASSWORD` (legacy mode), every new account shares that password, so any invitee could claim another pending account; the server logs a warning at startup.
 
 Optional (server):
 
@@ -52,6 +53,6 @@ Operational notes:
 - Rotate `THE_RIVER_AES_KEY` if a build, guide or repo history ever included it (earlier guides in this repository did). Rotating it makes history sealed with the old key unreadable.
 - `THE_RIVER_AES_KEY` is server-only and must be at least 32 characters long; shorter values are rejected by the server and the payload envelope. Never hand it to clients.
 - Protocol v2 is not compatible with v1 clients. An existing v1 database is migrated automatically at server start (password hashes become SCRAM credentials; users keep their passwords).
-- Treat `THE_RIVER_ADMIN_BOOTSTRAP_PASSWORD` and `THE_RIVER_NEW_USER_PASSWORD` as bootstrap values, not long-term user passwords.
+- Treat `THE_RIVER_ADMIN_BOOTSTRAP_PASSWORD` (and the per-account initial passwords from `/newuser`) as bootstrap values, not long-term user passwords; each invitee replaces theirs on first login.
 - Clients generate a private `.the_river_machine_id` on first run instead of deriving identity from the hostname. Keep that file private; deleting it changes the HWID seen by the server.
 - The chat history log stores a sealed audit entry with a payload SHA-256, not the message body itself.

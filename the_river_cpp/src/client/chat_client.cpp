@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -16,6 +17,17 @@
 #include <vector>
 
 #include <openssl/evp.h>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "client/attachment_utils.h"
 #include "client/platform_runtime.h"
@@ -144,7 +156,20 @@ void AppendSizedString(std::string& out, const std::string& value) {
 }
 
 constexpr std::size_t kMaxRoomTextBytes = 8 * 1024;  // spec 4.1 payload limit
-constexpr std::size_t kMaxPendingPerPeer = 64;
+constexpr std::size_t kMaxPendingPerPeer = 64;            // outgoing, waiting for a key
+constexpr std::size_t kMaxPendingIncomingPerPeer = 256;   // server queues <= 200 offline PMs
+constexpr std::size_t kMaxPendingIncomingTotal = 2000;
+constexpr std::size_t kMaxKeyGetNamesPerLine = 50;
+constexpr long long kKeyBatchWindowMs = 60;
+constexpr std::size_t kMaxHeldPerPeer = 64;
+constexpr std::size_t kMaxHeldUploadsPerPeer = 8;
+constexpr int kMaxConcurrentUploads = 2;
+constexpr std::size_t kMaxQueuedUploads = 8;
+constexpr int kFatalAuthBackoffSeconds = 30;
+constexpr int kTransientBackoffSeconds = 5;   // auth timeout / traffic limit
+constexpr int kKeyLookupRetrySeconds = 61;    // server key-lookup budget is per minute
+constexpr std::size_t kMaxSeenFileLines = 200000;
+constexpr const char* kUnverifiedPrefix = "[clave no verificada] ";
 constexpr const char* kKnownKeysFile = "river_known_keys.txt";
 constexpr int kMaxKnownKeyLines = 10000;
 constexpr const char* kIncompatibleServerError = "Servidor incompatible (se requiere protocolo 2).";
@@ -218,6 +243,49 @@ void WipeString(std::string& value) {
     value.clear();
 }
 
+// True on the thread running ReceiveLoop (key requests made there are batched).
+thread_local bool tlsOnReceiveThread = false;
+
+// True when the socket becomes readable (or fails) within timeoutMs.
+bool SocketReadable(SocketHandle sock, int timeoutMs) {
+    if (timeoutMs < 0) timeoutMs = 0;
+#ifdef _WIN32
+    WSAPOLLFD p{};
+    p.fd = sock;
+    p.events = POLLRDNORM;
+    return WSAPoll(&p, 1, timeoutMs) != 0;
+#else
+    pollfd p{sock, POLLIN, 0};
+    return ::poll(&p, 1, timeoutMs) != 0;
+#endif
+}
+
+bool IsLowerHex(const std::string& value, std::size_t size) {
+    if (value.size() != size) return false;
+    for (char c : value) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+long long NowUnix() {
+    return static_cast<long long>(std::time(nullptr));
+}
+
+// Creates `path` only if it does not exist yet (O_EXCL); never truncates.
+bool CreateFileExclusive(const std::string& path) {
+#ifdef _WIN32
+    const int fd = _open(path.c_str(), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, _S_IREAD | _S_IWRITE);
+    if (fd < 0) return false;
+    _close(fd);
+#else
+    const int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    ::close(fd);
+#endif
+    return true;
+}
+
 // Server control lines always start with "SYSTEM:"; matching only those keeps
 // chat text or nicknames (e.g. "ACTUALIZADO se unio") from triggering state changes.
 bool IsSystemNotice(const std::string& line, const char* token) {
@@ -233,17 +301,34 @@ std::string PartPathFor(const std::string& targetPath) {
 }
 
 std::shared_ptr<std::fstream> CreatePartFile(const std::string& partPath) {
-    {
-        // Create/truncate first: an in|out fstream will not create a missing file.
-        std::ofstream create(partPath, std::ios::binary | std::ios::trunc);
-        if (!create.is_open()) return nullptr;
-    }
+    // Exclusive create: another transfer's .part (or any existing file) is never
+    // truncated or shared. An in|out fstream will not create a missing file.
+    if (partPath.empty() || !CreateFileExclusive(partPath)) return nullptr;
     auto file = std::make_shared<std::fstream>(partPath, std::ios::binary | std::ios::in | std::ios::out);
     if (!file->is_open()) {
         RemovePartFile(partPath);
         return nullptr;
     }
     return file;
+}
+
+std::shared_ptr<std::fstream> CreateUniquePartFile(const std::string& targetPath, std::string& partPath) {
+    partPath.clear();
+    if (targetPath.empty()) return nullptr;
+    static std::atomic<unsigned long long> counter{0};
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        std::string candidate = PartPathFor(targetPath);
+        if (attempt > 0) {
+            candidate = targetPath + "." + river::scram::RandomNonceHex(4) + "-" +
+                        std::to_string(counter.fetch_add(1)) + ".part";
+        }
+        auto file = CreatePartFile(candidate);
+        if (file) {
+            partPath = candidate;
+            return file;
+        }
+    }
+    return nullptr;
 }
 
 int ExpectedChunkCount(std::size_t totalSize) {
@@ -310,6 +395,32 @@ void RemovePartFile(const std::string& partPath) {
 }
 
 }  // namespace attachment_part
+
+namespace rm1 {
+
+std::string Wrap(const std::string& msgIdHex, long long senderTs, const std::string& payload) {
+    return "RM1|" + msgIdHex + "|" + std::to_string(senderTs) + "|" + payload;
+}
+
+bool Parse(const std::string& plaintext, std::string& msgIdHex, long long& senderTs, std::string& payload) {
+    // "RM1|" + 32 lowercase hex + "|" + decimal ts + "|" + payload (may contain '|').
+    if (plaintext.rfind("RM1|", 0) != 0) return false;
+    const std::size_t idEnd = plaintext.find('|', 4);
+    if (idEnd == std::string::npos) return false;
+    const std::string id = plaintext.substr(4, idEnd - 4);
+    if (!IsLowerHex(id, 32)) return false;
+    const std::size_t tsEnd = plaintext.find('|', idEnd + 1);
+    if (tsEnd == std::string::npos) return false;
+    long long ts = 0;
+    if (!ParseUnixTs(plaintext.substr(idEnd + 1, tsEnd - idEnd - 1), ts) || ts <= 0) return false;
+    msgIdHex = id;
+    senderTs = ts;
+    payload = plaintext.substr(tsEnd + 1);
+    return true;
+}
+
+}  // namespace rm1
+
 ChatClient::ChatClient(ChatState& state) : state_(state) {}
 
 ChatClient::~ChatClient() {
@@ -401,20 +512,57 @@ void ChatClient::ReapFinishedUploads(bool joinAll) {
     }
 }
 
-void ChatClient::StartAttachmentUpload(const std::string& requester,
-                                       const std::string& requesterPub,
-                                       const std::string& attachmentId,
-                                       const std::string& mode) {
+void ChatClient::StartAttachmentUpload(const UploadJob& job) {
     ReapFinishedUploads(false);
+    if (stopRequested_.load()) return;
     // Uploads run off the receive thread so heartbeats and chat keep flowing
-    // while a large file streams to the requester.
-    auto done = std::make_shared<std::atomic<bool>>(false);
-    std::thread worker([this, requester, requesterPub, attachmentId, mode, done]() {
-        HandleAttachmentRequest(requester, requesterPub, attachmentId, mode);
-        done->store(true);
-    });
+    // while a large file streams to the requester. At most kMaxConcurrentUploads
+    // run at once (one per requester+id); the rest wait in a bounded queue.
+    const std::string key = job.requester + "|" + job.attachmentId;
+    bool busy = false;
+    {
+        std::lock_guard<std::mutex> lock(uploadsMutex_);
+        if (activeUploadKeys_.count(key) > 0) return;  // duplicate of an upload in flight
+        for (const auto& queued : uploadQueue_) {
+            if (queued.requester == job.requester && queued.attachmentId == job.attachmentId) return;
+        }
+        if (uploadWorkersRunning_ < kMaxConcurrentUploads) {
+            activeUploadKeys_.insert(key);
+            ++uploadWorkersRunning_;
+            auto done = std::make_shared<std::atomic<bool>>(false);
+            std::thread worker(&ChatClient::RunUploadWorker, this, job, done);
+            uploads_.push_back({std::move(worker), done});
+        } else if (uploadQueue_.size() < kMaxQueuedUploads) {
+            uploadQueue_.push_back(job);
+        } else {
+            busy = true;
+        }
+    }
+    if (busy) {
+        SealAndSendLine(true, job.requester, job.requesterPub,
+                        "@attacherr|" + job.attachmentId + "|" + river::base64::EncodeString("Ocupado, reintenta"));
+    }
+}
+
+void ChatClient::RunUploadWorker(UploadJob job, std::shared_ptr<std::atomic<bool>> done) {
+    while (true) {
+        if (!stopRequested_.load() && job.generation == connGeneration_.load()) HandleAttachmentRequest(job);
+        std::lock_guard<std::mutex> lock(uploadsMutex_);
+        activeUploadKeys_.erase(job.requester + "|" + job.attachmentId);
+        if (stopRequested_.load() || uploadQueue_.empty()) {
+            --uploadWorkersRunning_;
+            break;
+        }
+        job = uploadQueue_.front();
+        uploadQueue_.pop_front();
+        activeUploadKeys_.insert(job.requester + "|" + job.attachmentId);
+    }
+    done->store(true);
+}
+
+void ChatClient::ClearQueuedUploads() {
     std::lock_guard<std::mutex> lock(uploadsMutex_);
-    uploads_.push_back({std::move(worker), done});
+    uploadQueue_.clear();
 }
 
 void ChatClient::DiscardIncomingTransfer(IncomingAttachmentTransfer& transfer) {
@@ -556,10 +704,11 @@ void ChatClient::FailAuthFatal(const std::string& reason) {
     ForgetSessionCredentials();
     QueueAutoLogin("", "");
     ResetAuthExchange();
-    {
-        std::lock_guard<std::mutex> lock(reloginMutex_);
-        disconnectNotice_ = reason;
-    }
+    // Sticky until the user submits a new login; the next reconnect waits
+    // kFatalAuthBackoffSeconds instead of hammering the server.
+    SetStickyAuthError(reason);
+    backoffCancel_.store(false);
+    reconnectDelaySeconds_.store(kFatalAuthBackoffSeconds);
     state_.SetAuthenticated(false);
     state_.SetAuthActionPending(false);
     state_.SetCredentialChangePending(false);
@@ -567,6 +716,20 @@ void ChatClient::FailAuthFatal(const std::string& reason) {
     state_.SetLastError(reason);
     state_.AddSystemLog("SYSTEM: " + reason);
     CloseCurrentSocket();
+}
+
+void ChatClient::SetStickyAuthError(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(reloginMutex_);
+    stickyAuthError_ = reason;
+}
+
+void ChatClient::ApplyStickyAuthError() {
+    std::string reason;
+    {
+        std::lock_guard<std::mutex> lock(reloginMutex_);
+        reason = stickyAuthError_;
+    }
+    if (!reason.empty()) state_.SetLastError(reason);
 }
 
 int ChatClient::SendRawLine(const std::string& payload) {
@@ -605,6 +768,9 @@ void ChatClient::CloseCurrentSocket() {
 
 bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
     SetCurrentUser(user);
+    // A new login attempt replaces a sticky fatal-auth reason and ends the backoff.
+    SetStickyAuthError("");
+    backoffCancel_.store(true);
     state_.ClearLastError();
     state_.SetCredentialChangePending(false);
     AppendClientLog("SendLogin");
@@ -685,6 +851,11 @@ bool ChatClient::SendFirstLoginChange(const std::string& newUser, const std::str
 }
 
 bool ChatClient::SendPing() {
+    if (!authVerified_.load()) {
+        // The server does not answer PING before AUTH_OK.
+        state_.SetLastError("Sin sesion autenticada: PING no disponible.");
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(pingMutex_);
         pingOutstanding_ = true;
@@ -822,22 +993,33 @@ void ChatClient::ClearE2EState(bool notifyPending) {
         river::e2e::Clear(identityKey_);
     }
     std::map<std::string, std::vector<PendingOutgoingSealed>> outgoing;
+    std::map<std::string, std::vector<PendingOutgoingSealed>> held;
     {
         std::lock_guard<std::mutex> lock(peerMutex_);
         peerKeys_.clear();
         keyRequestsInFlight_.clear();
+        keyRequestQueue_.clear();
+        batchKeyGetUnsupported_ = false;
+        keyRetryPending_ = false;
         outgoing.swap(pendingOutgoing_);
+        held.swap(heldOutgoing_);
         pendingIncoming_.clear();
+        pendingIncomingTotal_ = 0;
         pendingFingerprint_.clear();
+        // Re-detected on the next key fetch: the changed key was never pinned.
+        unverifiedPeers_.clear();
+        heldUploads_.clear();
     }
-    for (auto& entry : outgoing) {
-        bool hadText = false;
-        for (auto& item : entry.second) {
-            if (!item.control) hadText = true;
-            WipeString(item.plaintext);
+    for (auto* source : {&outgoing, &held}) {
+        for (auto& entry : *source) {
+            bool hadText = false;
+            for (auto& item : entry.second) {
+                if (!item.control) hadText = true;
+                WipeString(item.plaintext);
+            }
+            if (notifyPending && hadText)
+                state_.AddSystemLog("SYSTEM: Mensaje privado a " + entry.first + " no enviado (enlace perdido).");
         }
-        if (notifyPending && hadText)
-            state_.AddSystemLog("SYSTEM: Mensaje privado a " + entry.first + " no enviado (enlace perdido).");
     }
 }
 
@@ -849,15 +1031,50 @@ bool ChatClient::CachedPeerKey(const std::string& user, std::string& pub) const 
     return true;
 }
 
+bool ChatClient::IsPeerUnverified(const std::string& user) const {
+    std::lock_guard<std::mutex> lock(peerMutex_);
+    return unverifiedPeers_.count(user) > 0;
+}
+
 void ChatClient::RequestPeerKey(const std::string& user) {
-    bool send = false;
+    bool queued = false;
     {
         std::lock_guard<std::mutex> lock(peerMutex_);
-        send = keyRequestsInFlight_.insert(user).second;
+        if (keyRequestsInFlight_.insert(user).second) {
+            if (keyRequestQueue_.empty()) keyQueueSince_ = std::chrono::steady_clock::now();
+            keyRequestQueue_.push_back(user);
+            queued = true;
+        }
     }
-    if (send && SendRawLine("[KEY_GET]:" + user + "\n") < 0) {
+    // On the receive thread the queue is flushed once the current burst of
+    // lines has been processed (ReceiveLoop), so e.g. offline PMs from many
+    // senders cost a few batch lines instead of one KEY_GET each.
+    if (queued && !tlsOnReceiveThread) FlushKeyRequests();
+}
+
+void ChatClient::FlushKeyRequests() {
+    std::vector<std::string> names;
+    bool singleOnly = false;
+    {
         std::lock_guard<std::mutex> lock(peerMutex_);
-        keyRequestsInFlight_.erase(user);
+        names.swap(keyRequestQueue_);
+        singleOnly = batchKeyGetUnsupported_;
+    }
+    if (names.empty()) return;
+    const std::size_t perLine = singleOnly ? 1 : kMaxKeyGetNamesPerLine;
+    std::vector<std::string> failed;
+    for (std::size_t i = 0; i < names.size(); i += perLine) {
+        const std::size_t end = std::min(names.size(), i + perLine);
+        std::string list;
+        for (std::size_t j = i; j < end; ++j) {
+            if (j > i) list += ",";
+            list += names[j];
+        }
+        if (SendRawLine("[KEY_GET]:" + list + "\n") < 0) failed.insert(failed.end(), names.begin() + i, names.begin() + end);
+    }
+    if (!failed.empty()) {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        for (const auto& name : failed) keyRequestsInFlight_.erase(name);
     }
 }
 
@@ -867,8 +1084,15 @@ bool ChatClient::SealAndSendLine(bool control,
                                  const std::string& plaintext) {
     const std::string me = CurrentUser();
     if (me.empty()) return false;
+    // Spec 4.4: a fresh message id and the sender clock go inside the sealed
+    // plaintext so the recipient can reject replays and show the real time.
+    const std::string msgId = river::scram::RandomNonceHex(16);
+    if (!IsLowerHex(msgId, 32)) return false;
+    std::string wrapped = rm1::Wrap(msgId, NowUnix(), plaintext);
     std::string envelope;
-    if (!SealWithIdentity("pm", me, target, targetPub, plaintext, envelope)) return false;
+    const bool sealed = SealWithIdentity("pm", me, target, targetPub, wrapped, envelope);
+    WipeString(wrapped);
+    if (!sealed) return false;
     return SendRawLine(std::string(control ? "[PMX]:" : "[PM2]:") + target + ":" +
                        river::base64::EncodeString(envelope) + "\n") >= 0;
 }
@@ -877,10 +1101,17 @@ bool ChatClient::SendSealedToUser(const std::string& target, const std::string& 
     if (!HasIdentity() || CurrentUser().empty() || !IsValidUsername(target)) return false;
     std::string pub;
     bool queued = false;
+    bool held = false;
     {
         std::lock_guard<std::mutex> lock(peerMutex_);
         auto it = peerKeys_.find(target);
-        if (it != peerKeys_.end()) {
+        if (unverifiedPeers_.count(target) > 0) {
+            // The peer's key changed and the user has not accepted it yet.
+            auto& queue = heldOutgoing_[target];
+            if (queue.size() >= kMaxHeldPerPeer) return false;
+            queue.push_back({control, plaintext});
+            held = true;
+        } else if (it != peerKeys_.end()) {
             pub = it->second;
         } else {
             auto& queue = pendingOutgoing_[target];
@@ -888,6 +1119,12 @@ bool ChatClient::SendSealedToUser(const std::string& target, const std::string& 
             queue.push_back({control, plaintext});
             queued = true;
         }
+    }
+    if (held) {
+        state_.AddSystemLog(std::string("SYSTEM: ") + (control ? "Solicitud de adjunto" : "Mensaje privado") + " a " +
+                            target + " retenido: su clave cambio. Usa /trust " + target +
+                            " para aceptar la nueva clave.");
+        return true;
     }
     if (queued) {
         // Sent once the KEY: reply arrives (HandleKeyReply).
@@ -940,29 +1177,18 @@ bool ChatClient::SaveKnownKeysLocked() const {
     return true;
 }
 
-void ChatClient::CheckAndPinPeerKey(const std::string& user, const std::string& pub) {
+ChatClient::PinResult ChatClient::CheckAndPinPeerKey(const std::string& user, const std::string& pub) {
     const std::string fingerprint = river::e2e::Fingerprint(pub);
-    if (fingerprint.empty()) return;
-    bool changed = false;
-    {
-        std::lock_guard<std::mutex> lock(pinsMutex_);
-        LoadKnownKeysLocked();
-        auto it = knownKeyPins_.find(user);
-        bool save = false;
-        if (it == knownKeyPins_.end()) {
-            knownKeyPins_[user] = fingerprint;  // first sight: trust on first use
-            save = true;
-        } else if (it->second != fingerprint) {
-            it->second = fingerprint;
-            changed = true;
-            save = true;
-        }
-        if (save) SaveKnownKeysLocked();
+    std::lock_guard<std::mutex> lock(pinsMutex_);
+    LoadKnownKeysLocked();
+    auto it = knownKeyPins_.find(user);
+    if (it == knownKeyPins_.end()) {
+        knownKeyPins_[user] = fingerprint;  // first sight: trust on first use
+        SaveKnownKeysLocked();
+        return PinResult::FirstSight;
     }
-    if (changed) {
-        state_.AddSystemLog("[!] La clave de " + user + " cambio (huella " + fingerprint +
-                            "). Verificala por otro canal.");
-    }
+    // A changed key is never re-pinned automatically: /trust does that.
+    return it->second == fingerprint ? PinResult::Matches : PinResult::Changed;
 }
 
 void ChatClient::HandleKeyReply(const std::string& rest) {
@@ -971,6 +1197,24 @@ void ChatClient::HandleKeyReply(const std::string& rest) {
     if (sep == std::string::npos) return;
     const std::string user = rest.substr(0, sep);
     const std::string value = rest.substr(sep + 1);
+
+    if (user.find(',') != std::string::npos) {
+        // A server without the batch form answered "KEY:<a,b,...>:-" for the
+        // whole list: ask again one name per line.
+        const std::vector<std::string> names = SplitByDelimiter(user, ',');
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            batchKeyGetUnsupported_ = true;
+            for (const auto& name : names) {
+                if (IsValidUsername(name) && keyRequestsInFlight_.count(name) > 0) {
+                    if (keyRequestQueue_.empty()) keyQueueSince_ = std::chrono::steady_clock::now();
+                    keyRequestQueue_.push_back(name);
+                }
+            }
+        }
+        FlushKeyRequests();
+        return;
+    }
     if (!IsValidUsername(user)) return;
 
     std::string pub;
@@ -978,7 +1222,12 @@ void ChatClient::HandleKeyReply(const std::string& rest) {
                         pub.size() == river::e2e::kKeyBytes;
     std::vector<PendingOutgoingSealed> outgoing;
     std::vector<PendingIncomingSealed> incoming;
+    std::vector<UploadJob> uploads;
     bool wantedFingerprint = false;
+    const PinResult pin = hasKey ? CheckAndPinPeerKey(user, pub) : PinResult::Matches;
+    const std::string fingerprint = hasKey ? river::e2e::Fingerprint(pub) : std::string();
+    bool warn = false;
+    std::size_t newlyHeldText = 0;
     {
         std::lock_guard<std::mutex> lock(peerMutex_);
         keyRequestsInFlight_.erase(user);
@@ -992,9 +1241,41 @@ void ChatClient::HandleKeyReply(const std::string& rest) {
         auto in = pendingIncoming_.find(user);
         if (in != pendingIncoming_.end()) {
             incoming.swap(in->second);
+            pendingIncomingTotal_ -= std::min(pendingIncomingTotal_, incoming.size());
             pendingIncoming_.erase(in);
         }
         wantedFingerprint = pendingFingerprint_.erase(user) > 0;
+        if (hasKey && pin == PinResult::Changed) {
+            // Hold everything for this peer until the user runs /trust.
+            std::string& shown = unverifiedPeers_[user];
+            if (shown != fingerprint) {
+                shown = fingerprint;
+                warn = true;
+            }
+            auto& heldQueue = heldOutgoing_[user];
+            for (auto& item : outgoing) {
+                if (!item.control) ++newlyHeldText;
+                if (heldQueue.size() < kMaxHeldPerPeer) heldQueue.push_back(std::move(item));
+                else WipeString(item.plaintext);
+            }
+            outgoing.clear();
+        } else if (hasKey) {
+            // The key matches the pin again: release what was held for it.
+            if (unverifiedPeers_.erase(user) > 0) {
+                auto held = heldOutgoing_.find(user);
+                if (held != heldOutgoing_.end()) {
+                    held->second.insert(held->second.end(), std::make_move_iterator(outgoing.begin()),
+                                        std::make_move_iterator(outgoing.end()));
+                    outgoing.swap(held->second);
+                    heldOutgoing_.erase(held);
+                }
+                auto heldUp = heldUploads_.find(user);
+                if (heldUp != heldUploads_.end()) {
+                    uploads.swap(heldUp->second);
+                    heldUploads_.erase(heldUp);
+                }
+            }
+        }
     }
 
     if (!hasKey) {
@@ -1028,13 +1309,25 @@ void ChatClient::HandleKeyReply(const std::string& rest) {
         return;
     }
 
-    CheckAndPinPeerKey(user, pub);
-    if (wantedFingerprint)
-        state_.AddSystemLog("SYSTEM: Huella de " + user + ": " + river::e2e::Fingerprint(pub));
+    if (warn) {
+        state_.AddSystemLog("[!] La clave de " + user + " cambio (huella " + fingerprint +
+                            "). Verificala por otro canal. Usa /trust " + user + " para aceptar la nueva clave.");
+    }
+    if (newlyHeldText > 0) {
+        state_.AddSystemLog("SYSTEM: Mensaje privado a " + user + " retenido hasta que aceptes su nueva clave (/trust " +
+                            user + ").");
+    }
+    if (wantedFingerprint) {
+        state_.AddSystemLog("SYSTEM: Huella de " + user + ": " + fingerprint +
+                            (pin == PinResult::Changed ? " (NO verificada: usa /trust " + user + " para aceptarla)" : ""));
+    }
     for (auto& item : outgoing) {
         if (!SealAndSendLine(item.control, user, pub, item.plaintext) && !item.control)
             state_.AddSystemLog("SYSTEM: Could not send the private message.");
         WipeString(item.plaintext);
+    }
+    for (const auto& job : uploads) {
+        if (job.requesterPub == pub) StartAttachmentUpload(job);
     }
     for (const auto& item : incoming) DeliverIncomingSealed(user, pub, item);
 }
@@ -1043,6 +1336,73 @@ void ChatClient::HandleKeyChanged(const std::string& user) {
     if (!IsValidUsername(user) || user == CurrentUser()) return;
     std::lock_guard<std::mutex> lock(peerMutex_);
     peerKeys_.erase(user);
+}
+
+void ChatClient::TrustPeerKey(const std::string& user) {
+    if (!IsValidUsername(user) || user == CurrentUser()) {
+        state_.AddSystemLog("SYSTEM: Usage: /trust <user>");
+        return;
+    }
+    std::string fingerprint;
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        auto it = unverifiedPeers_.find(user);
+        if (it == unverifiedPeers_.end()) {
+            state_.AddSystemLog("SYSTEM: No hay ningun cambio de clave pendiente de aceptar para " + user + ".");
+            return;
+        }
+        fingerprint = it->second;
+    }
+    {
+        // Pin exactly the fingerprint the warning showed.
+        std::lock_guard<std::mutex> lock(pinsMutex_);
+        LoadKnownKeysLocked();
+        knownKeyPins_[user] = fingerprint;
+        SaveKnownKeysLocked();
+    }
+    std::vector<PendingOutgoingSealed> outgoing;
+    std::vector<UploadJob> uploads;
+    std::string pub;
+    bool keyCurrent = false;
+    {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        auto it = unverifiedPeers_.find(user);
+        if (it != unverifiedPeers_.end() && it->second == fingerprint) unverifiedPeers_.erase(it);
+        auto held = heldOutgoing_.find(user);
+        if (held != heldOutgoing_.end()) {
+            outgoing.swap(held->second);
+            heldOutgoing_.erase(held);
+        }
+        auto heldUp = heldUploads_.find(user);
+        if (heldUp != heldUploads_.end()) {
+            uploads.swap(heldUp->second);
+            heldUploads_.erase(heldUp);
+        }
+        auto key = peerKeys_.find(user);
+        keyCurrent = key != peerKeys_.end() && river::e2e::Fingerprint(key->second) == fingerprint;
+        if (keyCurrent) {
+            pub = key->second;
+        } else {
+            // Not cached (or changed again): send once the key is fetched and
+            // matches the new pin.
+            auto& queue = pendingOutgoing_[user];
+            for (auto& item : outgoing) queue.push_back(std::move(item));
+            outgoing.clear();
+        }
+    }
+    state_.AddSystemLog("SYSTEM: Nueva clave de " + user + " aceptada (huella " + fingerprint + ").");
+    if (!keyCurrent) {
+        RequestPeerKey(user);
+        return;
+    }
+    for (auto& item : outgoing) {
+        if (!SealAndSendLine(item.control, user, pub, item.plaintext) && !item.control)
+            state_.AddSystemLog("SYSTEM: Could not send the private message.");
+        WipeString(item.plaintext);
+    }
+    for (const auto& job : uploads) {
+        if (job.requesterPub == pub) StartAttachmentUpload(job);
+    }
 }
 
 void ChatClient::ShowFingerprint(const std::string& user) {
@@ -1062,7 +1422,8 @@ void ChatClient::ShowFingerprint(const std::string& user) {
     }
     std::string pub;
     if (CachedPeerKey(user, pub)) {
-        state_.AddSystemLog("SYSTEM: Huella de " + user + ": " + river::e2e::Fingerprint(pub));
+        state_.AddSystemLog("SYSTEM: Huella de " + user + ": " + river::e2e::Fingerprint(pub) +
+                            (IsPeerUnverified(user) ? " (NO verificada: usa /trust " + user + " para aceptarla)" : ""));
         return;
     }
     if (!state_.IsAuthenticated()) {
@@ -1101,8 +1462,12 @@ void ChatClient::HandleIncomingSealed(const std::string& rest, bool control) {
             pub = it->second;
         } else {
             auto& queue = pendingIncoming_[from];
-            if (queue.size() >= kMaxPendingPerPeer) overflow = true;
-            else queue.push_back(item);
+            if (queue.size() >= kMaxPendingIncomingPerPeer || pendingIncomingTotal_ >= kMaxPendingIncomingTotal) {
+                overflow = true;
+            } else {
+                queue.push_back(std::move(item));
+                ++pendingIncomingTotal_;
+            }
             queued = true;
         }
     }
@@ -1123,13 +1488,164 @@ void ChatClient::DeliverIncomingSealed(const std::string& from,
                                        const PendingIncomingSealed& item) {
     const std::string me = CurrentUser();
     std::string plaintext;
-    if (me.empty() || !OpenWithIdentity("pm", from, me, fromPub, item.envelope, plaintext)) {
+    std::string msgId;
+    std::string payload;
+    long long senderTs = 0;
+    if (me.empty() || !OpenWithIdentity("pm", from, me, fromPub, item.envelope, plaintext) ||
+        !rm1::Parse(plaintext, msgId, senderTs, payload)) {
+        // Undecryptable, or not in the RM1 format (spec 4.4): rejected.
+        WipeString(plaintext);
         state_.AddSystemLog("[PM ilegible de " + from + "]");
         return;
     }
-    if (HandleAttachmentPrivateControl(from, fromPub, plaintext)) return;
+    WipeString(plaintext);
+    const SeenResult seen = CheckAndRecordMessageId(me, from, msgId, senderTs);
+    if (seen != SeenResult::Accepted) {
+        WipeString(payload);
+        if (!item.control) {
+            state_.AddSystemLog(seen == SeenResult::Duplicate
+                                    ? "SYSTEM: [!] Mensaje privado repetido de " + from + " descartado (reenvio)."
+                                    : "SYSTEM: [!] Mensaje privado de " + from +
+                                          " descartado (marca de tiempo fuera de rango).");
+        }
+        return;
+    }
+    const bool unverified = IsPeerUnverified(from);
+    if (HandleAttachmentPrivateControl(from, fromPub, payload, unverified)) return;
     if (item.control) return;  // [PMX] only carries attachment control
-    state_.AddIncomingPrivateMessage(from, plaintext, item.unixTs, me);
+    // The authenticated sender clock replaces the server timestamp.
+    state_.AddIncomingPrivateMessage(from, unverified ? kUnverifiedPrefix + payload : payload, senderTs, me);
+    WipeString(payload);
+}
+
+// ---------------------------------------------------------------------------
+// Replay protection: seen RM1 message ids (spec 4.4)
+// ---------------------------------------------------------------------------
+
+bool ChatClient::InsertSeenLocked(SeenPeerIds& peer, const std::string& msgId, long long ts, bool& evicted) {
+    if (!peer.ids.emplace(msgId, ts).second) return false;
+    peer.byTs.emplace(ts, msgId);
+    while (peer.ids.size() > rm1::kMaxIdsPerPeer && !peer.byTs.empty()) {
+        // Anything at or before an evicted id's timestamp is rejected from now on,
+        // so evicting never reopens a replay window.
+        auto oldest = peer.byTs.begin();
+        peer.watermark = std::max(peer.watermark, oldest->first);
+        peer.ids.erase(oldest->second);
+        peer.byTs.erase(oldest);
+        evicted = true;
+    }
+    return true;
+}
+
+void ChatClient::LoadSeenIdsLocked() {
+    if (seenLoaded_) return;
+    seenLoaded_ = true;
+    std::ifstream input(rm1::kSeenIdsFile);
+    if (!input.is_open()) return;
+    const long long minTs = NowUnix() - rm1::kMaxAgeSeconds;
+    std::string line;
+    std::size_t lines = 0;
+    bool pruned = false;
+    while (lines < kMaxSeenFileLines && std::getline(input, line)) {
+        ++lines;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::istringstream in(line);
+        std::string tag;
+        std::string me;
+        std::string peer;
+        in >> tag >> me >> peer;
+        if (!IsValidUsername(me) || !IsValidUsername(peer)) continue;
+        SeenPeerIds& entry = seenIds_[me + " " + peer];
+        if (tag == "S") {
+            std::string id;
+            std::string tsText;
+            long long ts = 0;
+            in >> id >> tsText;
+            if (!IsLowerHex(id, 32) || !ParseUnixTs(tsText, ts)) continue;
+            if (ts < minTs) {
+                pruned = true;  // rejected by age anyway
+                continue;
+            }
+            bool evicted = false;
+            InsertSeenLocked(entry, id, ts, evicted);
+        } else if (tag == "W") {
+            std::string tsText;
+            long long ts = 0;
+            in >> tsText;
+            if (ParseUnixTs(tsText, ts)) entry.watermark = std::max(entry.watermark, ts);
+        }
+    }
+    seenFileLines_ = lines;
+    std::size_t live = 0;
+    for (const auto& entry : seenIds_) live += entry.second.ids.size() + 1;
+    if (pruned || seenFileLines_ > live * 2 + 1000) CompactSeenIdsLocked();
+}
+
+void ChatClient::CompactSeenIdsLocked() {
+    const std::string target = rm1::kSeenIdsFile;
+    const std::string temp = target + ".tmp";
+    const long long minTs = NowUnix() - rm1::kMaxAgeSeconds;
+    std::size_t lines = 0;
+    {
+        std::ofstream out(temp, std::ios::trunc);
+        if (!out.is_open()) return;
+        for (const auto& entry : seenIds_) {
+            // A watermark older than the age limit adds nothing.
+            if (entry.second.watermark >= minTs) {
+                out << "W " << entry.first << " " << entry.second.watermark << "\n";
+                ++lines;
+            }
+            for (const auto& id : entry.second.ids) {
+                out << "S " << entry.first << " " << id.first << " " << id.second << "\n";
+                ++lines;
+            }
+        }
+        out.flush();
+        if (!out.good()) {
+            out.close();
+            std::remove(temp.c_str());
+            return;
+        }
+    }
+    if (std::rename(temp.c_str(), target.c_str()) != 0) {
+        std::remove(target.c_str());
+        if (std::rename(temp.c_str(), target.c_str()) != 0) {
+            std::remove(temp.c_str());
+            return;
+        }
+    }
+    seenFileLines_ = lines;
+}
+
+ChatClient::SeenResult ChatClient::CheckAndRecordMessageId(const std::string& me,
+                                                           const std::string& peer,
+                                                           const std::string& msgId,
+                                                           long long senderTs) {
+    const long long now = NowUnix();
+    if (senderTs > now + rm1::kMaxFutureSeconds) return SeenResult::BadTimestamp;
+    if (senderTs < now - rm1::kMaxAgeSeconds) return SeenResult::TooOld;
+    std::lock_guard<std::mutex> lock(seenMutex_);
+    LoadSeenIdsLocked();
+    const std::string key = me + " " + peer;
+    SeenPeerIds& entry = seenIds_[key];
+    if (senderTs <= entry.watermark) return SeenResult::TooOld;
+    if (entry.ids.count(msgId) > 0) return SeenResult::Duplicate;
+    bool evicted = false;
+    InsertSeenLocked(entry, msgId, senderTs, evicted);
+    {
+        // Append-only between compactions; flushed before the message is shown.
+        std::ofstream out(rm1::kSeenIdsFile, std::ios::app);
+        if (out.is_open()) {
+            out << "S " << key << " " << msgId << " " << senderTs << "\n";
+            if (evicted) out << "W " << key << " " << entry.watermark << "\n";
+            out.flush();
+        }
+    }
+    seenFileLines_ += evicted ? 2 : 1;
+    std::size_t live = 0;
+    for (const auto& peerEntry : seenIds_) live += peerEntry.second.ids.size() + 1;
+    if (seenFileLines_ > live * 2 + 1000) CompactSeenIdsLocked();
+    return SeenResult::Accepted;
 }
 
 void ChatClient::HandleRoomLine(const std::string& rest, bool fromHistory) {
@@ -1270,10 +1786,11 @@ bool ChatClient::HandleAttachmentBroadcast(const std::string& line) {
     return true;
 }
 
-void ChatClient::HandleAttachmentRequest(const std::string& requester,
-                                         const std::string& requesterPub,
-                                         const std::string& attachmentId,
-                                         const std::string& mode) {
+void ChatClient::HandleAttachmentRequest(const UploadJob& job) {
+    const std::string& requester = job.requester;
+    const std::string& requesterPub = job.requesterPub;
+    const std::string& attachmentId = job.attachmentId;
+    const std::string& mode = job.mode;
     auto sendError = [&](const std::string& text) {
         SealAndSendLine(true, requester, requesterPub,
                         "@attacherr|" + attachmentId + "|" + river::base64::EncodeString(text));
@@ -1325,7 +1842,7 @@ void ChatClient::HandleAttachmentRequest(const std::string& requester,
     const std::string me = CurrentUser();
     const std::string context = "att:" + attachmentId;
     for (std::size_t index = 0; index < totalChunks; ++index) {
-        if (stopRequested_.load()) return;
+        if (stopRequested_.load() || job.generation != connGeneration_.load()) return;
         std::string plainChunk;
         if (draft.sizeBytes > 0) {
             std::vector<char> buffer(kAttachmentBinaryChunkBytes);
@@ -1384,16 +1901,52 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
                                  transfer.targetPath);
     state_.SetStatusDetail("Attachment received: " + transfer.attachment.displayName);
     state_.AddSystemLog("SYSTEM: Attachment received and saved to " + transfer.targetPath);
+    if (transfer.attachment.kind != AttachmentKind::File &&
+        !IsAttachmentSafeToOpen(transfer.attachment.kind, transfer.targetPath)) {
+        state_.AddSystemLog("SYSTEM: [!] " + transfer.attachment.displayName +
+                            " no tiene una extension de imagen/video permitida: no se abrira desde el chat. "
+                            "Usa Guardar como... y revisalo antes de ejecutarlo.");
+    }
     state_.ClearLastError();
 }
 
 bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender,
                                                 const std::string& senderPub,
-                                                const std::string& payload) {
+                                                const std::string& payload,
+                                                bool unverifiedKey) {
     if (payload.rfind("@attachreq|", 0) == 0) {
         const std::vector<std::string> parts = SplitByDelimiter(payload, '|');
-        if (parts.size() >= 3 && IsValidAttachmentId(parts[1]) && parts[2].find(':') == std::string::npos)
-            StartAttachmentUpload(sender, senderPub, parts[1], parts[2]);
+        if (parts.size() < 3 || !IsValidAttachmentId(parts[1]) || parts[2].find(':') != std::string::npos ||
+            parts[2].size() > 32) {
+            return true;
+        }
+        UploadJob job;
+        job.requester = sender;
+        job.requesterPub = senderPub;
+        job.attachmentId = parts[1];
+        job.mode = parts[2];
+        job.generation = connGeneration_.load();
+        if (unverifiedKey) {
+            // The requester's key changed and was not accepted: hold the upload.
+            bool added = false;
+            {
+                std::lock_guard<std::mutex> lock(peerMutex_);
+                auto& held = heldUploads_[sender];
+                bool duplicate = false;
+                for (const auto& existing : held) duplicate = duplicate || existing.attachmentId == job.attachmentId;
+                if (!duplicate && held.size() < kMaxHeldUploadsPerPeer) {
+                    held.push_back(job);
+                    added = true;
+                }
+            }
+            if (added) {
+                state_.AddSystemLog("SYSTEM: Solicitud de adjunto de " + sender +
+                                    " retenida: su clave cambio. Usa /trust " + sender +
+                                    " para aceptar la nueva clave.");
+            }
+            return true;
+        }
+        StartAttachmentUpload(job);
         return true;
     }
 
@@ -1410,6 +1963,8 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender,
             if (pending == incomingAttachments_.end()) return true;
             IncomingAttachmentTransfer& transfer = pending->second;
             if (transfer.partFile) return true;  // duplicate metadata for a transfer already in flight
+            if (unverifiedKey) failure = "La clave de " + sender + " cambio: usa /trust " + sender +
+                                         " y vuelve a pedir el adjunto.";
             transfer.ownerUser = sender;
             transfer.ownerPub = senderPub;
             transfer.attachment.id = parts[1];
@@ -1425,16 +1980,19 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender,
             if (parts.size() >= 9) transfer.attachment.contentSha256 = parts[8];
             transfer.receivedChunks = 0;
             transfer.attachment.state = AttachmentTransferState::Requested;
-            if (transfer.targetPath.empty()) transfer.targetPath = BuildAttachmentCachePath(parts[1], transfer.attachment.displayName);
+            if (transfer.targetPath.empty())
+                transfer.targetPath = BuildAttachmentCachePath(sender, parts[1], transfer.attachment.displayName);
 
-            if (transfer.attachment.sizeBytes > kMaxAttachmentBytes) {
+            if (!failure.empty()) {
+                // unverified sender key (set above)
+            } else if (transfer.attachment.sizeBytes > kMaxAttachmentBytes) {
                 failure = "Attachment exceeds the transfer limit.";
             } else if (transfer.totalChunks != attachment_part::ExpectedChunkCount(transfer.attachment.sizeBytes)) {
                 failure = "Attachment metadata is invalid.";
             } else {
                 transfer.receivedIndices.assign(static_cast<std::size_t>(transfer.totalChunks), false);
-                transfer.partPath = attachment_part::PartPathFor(transfer.targetPath);
-                transfer.partFile = attachment_part::CreatePartFile(transfer.partPath);
+                // Exclusive, unique .part name: never truncates another transfer's file.
+                transfer.partFile = attachment_part::CreateUniquePartFile(transfer.targetPath, transfer.partPath);
                 if (!transfer.partFile) {
                     transfer.partPath.clear();
                     failure = "Could not save the received attachment.";
@@ -1587,6 +2145,49 @@ bool ChatClient::HandleAttachmentChunkFrame(const std::string& payload) {
 void ChatClient::ReceiveLoop(SocketHandle sock) {
     AppendClientLog("ReceiveLoop start");
     while (!stopRequested_.load()) {
+        // Key requests made while handling a burst of lines (e.g. the offline
+        // PMs after login) are coalesced: they go out as batch KEY_GET lines
+        // once no further line arrives within kKeyBatchWindowMs, the window
+        // expires, or a line is full.
+        while (true) {
+            std::size_t queued = 0;
+            std::chrono::steady_clock::time_point since;
+            {
+                std::lock_guard<std::mutex> lock(peerMutex_);
+                queued = keyRequestQueue_.size();
+                since = keyQueueSince_;
+            }
+            if (queued == 0) {
+                // Names the server left unanswered (key-lookup budget) are asked again later.
+                std::chrono::steady_clock::time_point retryAt;
+                bool retry = false;
+                {
+                    std::lock_guard<std::mutex> lock(peerMutex_);
+                    retry = keyRetryPending_;
+                    retryAt = keyRetryAt_;
+                }
+                if (!retry) break;
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    retryAt - std::chrono::steady_clock::now()).count();
+                if (left > 0 && SocketReadable(sock, static_cast<int>(std::min<long long>(left, 1000)))) break;
+                if (left > 0) continue;
+                {
+                    std::lock_guard<std::mutex> lock(peerMutex_);
+                    keyRetryPending_ = false;
+                    keyRequestQueue_.assign(keyRequestsInFlight_.begin(), keyRequestsInFlight_.end());
+                    keyQueueSince_ = std::chrono::steady_clock::now();
+                }
+                FlushKeyRequests();
+                break;
+            }
+            const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - since).count();
+            if (queued >= kMaxKeyGetNamesPerLine || waited >= kKeyBatchWindowMs ||
+                !SocketReadable(sock, static_cast<int>(kKeyBatchWindowMs - waited))) {
+                FlushKeyRequests();
+            }
+            break;
+        }
         std::uint16_t frameType = 0;
         std::string line;
         if (!RecvFrame(sock, frameType, line, 1024 * 1024)) {
@@ -1710,6 +2311,9 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             if (!BannerHasProto2(line)) {
                 AppendClientLog("ReceiveLoop incompatible protocol");
                 bannerState_.store(2);
+                SetStickyAuthError(kIncompatibleServerError);
+                backoffCancel_.store(false);
+                reconnectDelaySeconds_.store(kFatalAuthBackoffSeconds);  // if the server drops us, do not hammer it
                 state_.SetAuthActionPending(false);
                 state_.SetStatusDetail("Servidor incompatible.");
                 state_.SetLastError(kIncompatibleServerError);
@@ -1719,6 +2323,7 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             bannerState_.store(1);
             state_.SetStatusDetail("Canal Tor establecido. Esperando login.");
             state_.ClearLastError();
+            ApplyStickyAuthError();
             {
                 // Keep the reason for a forced disconnect visible on the login screen.
                 std::lock_guard<std::mutex> lock(reloginMutex_);
@@ -1809,6 +2414,31 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetStatusDetail("Could not complete the initial update.");
             state_.SetLastError("Could not update the user or key.");
             state_.AddSystemLog("SYSTEM: ERROR ACTUALIZANDO USUARIO.");
+        } else if (IsSystemNotice(line, "LIMITE DE CONSULTAS DE CLAVES EXCEDIDO")) {
+            AppendClientLog("ReceiveLoop line=KEY LOOKUP LIMIT");
+            // Unanswered names stay in flight (not keyless) and are retried later.
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            if (!keyRetryPending_) {
+                keyRetryPending_ = true;
+                keyRetryAt_ = std::chrono::steady_clock::now() + std::chrono::seconds(kKeyLookupRetrySeconds);
+            }
+        } else if (IsSystemNotice(line, "TIEMPO DE AUTENTICACION AGOTADO") ||
+                   IsSystemNotice(line, "LIMITE DE TRAFICO EXCEDIDO")) {
+            AppendClientLog("ReceiveLoop line=SERVER CLOSE NOTICE");
+            // The server closes the link: show why, and wait a little before
+            // reconnecting instead of spinning.
+            const std::string reason = line.substr(8);
+            {
+                std::lock_guard<std::mutex> lock(reloginMutex_);
+                disconnectNotice_ = reason;
+            }
+            backoffCancel_.store(false);
+            reconnectDelaySeconds_.store(kTransientBackoffSeconds);
+            state_.SetAuthActionPending(false);
+            state_.SetCredentialChangePending(false);
+            state_.SetLastError(reason);
+            state_.AddSystemLog(line);
+            break;
         } else if (IsSystemNotice(line, "CLAVE PUBLICA RECHAZADA")) {
             AppendClientLog("ReceiveLoop line=KEY REJECTED");
             state_.SetLastError("El servidor rechazo la clave publica.");
@@ -1832,6 +2462,7 @@ void ChatClient::NetworkLoop() {
             state_.SetStatusDetail("Configura THE_RIVER_ONION antes de conectar.");
             state_.SetLastError("Falta la configuracion local: THE_RIVER_ONION (direccion .onion del servidor).");
             AppendClientLog("NetworkLoop missing private config");
+            ApplyStickyAuthError();
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
         }
@@ -1868,6 +2499,7 @@ void ChatClient::NetworkLoop() {
                 state_.SetStatusDetail("Could not open an onion circuit to the server.");
                 state_.SetLastError("Tor no disponible o hidden service sin respuesta.");
             }
+            ApplyStickyAuthError();
             for (int i = 0; i < 50 && !stopRequested_.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
@@ -1876,6 +2508,8 @@ void ChatClient::NetworkLoop() {
         bannerState_.store(0);
         inHistory_ = false;
         ResetAuthExchange();
+        connGeneration_.fetch_add(1);
+        reconnectDelaySeconds_.store(0);
         {
             std::lock_guard<std::mutex> lock(socketMutex_);
             socket_ = sock;
@@ -1884,8 +2518,13 @@ void ChatClient::NetworkLoop() {
         state_.SetConnectionState(ConnState::TOR_READY);
         state_.SetStatusDetail("Canal Tor listo. Esperando banner del servidor...");
         state_.ClearLastError();
+        ApplyStickyAuthError();
+        tlsOnReceiveThread = true;
         ReceiveLoop(sock);
+        tlsOnReceiveThread = false;
         CloseCurrentSocket();
+        connGeneration_.fetch_add(1);  // aborts uploads still streaming to the old link
+        ClearQueuedUploads();
         FailPendingIncomingAttachments("Enlace perdido durante la transferencia del adjunto.");
         // Identity keys live only while logged in; the next login reloads them.
         ClearE2EState(true);
@@ -1897,6 +2536,14 @@ void ChatClient::NetworkLoop() {
         state_.SetCredentialChangePending(false);
         state_.SetStatusDetail("Canal cerrado. Reintentando enlace...");
         AppendClientLog("NetworkLoop DISCONNECTED");
+        const int delay = reconnectDelaySeconds_.exchange(0);
+        if (delay > 0) {
+            AppendClientLog("NetworkLoop reconnect backoff");
+            state_.SetStatusDetail("Reintento del enlace en " + std::to_string(delay) + " s.");
+            ApplyStickyAuthError();
+            for (int i = 0; i < delay * 10 && !stopRequested_.load() && !backoffCancel_.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
     AppendClientLog("NetworkLoop end");
 }
