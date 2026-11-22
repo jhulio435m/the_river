@@ -1,0 +1,44 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "site/index.html"
+        ],
+        "createdAt": "2026-11-22T14:02:43.068Z",
+        "reason": "Agent: compact terminal status badges are part of the approved BBS mock; section headings now have ample padding"
+      },
+      {
+        "rule": "ai-color-palette",
+        "value": "*",
+        "files": [
+          "site/download.html"
+        ],
+        "createdAt": "2026-11-22T14:02:43.105Z",
+        "reason": "User confirmed the existing BBS aesthetic; magenta headings match the client palette and have no gradient"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "site/security.html"
+        ],
+        "createdAt": "2026-11-22T14:02:43.143Z",
+        "reason": "Agent: table cells provide their own inset inside the outer scroll border"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "site/guide.html"
+        ],
+        "createdAt": "2026-11-22T14:02:43.179Z",
+        "reason": "Agent: table cells provide their own inset inside the outer scroll border"
+      }
+    ]
+  }
+}
