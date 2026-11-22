@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="es" data-title-es="Guía — The River" data-title-en="Guide — The River">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guía — The River</title>
+  <meta name="description" content="Comandos del cliente y de administración de The River, variables de entorno y cómo montar un servidor sobre Tor.">
+  <meta name="theme-color" content="#0000a8">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main"><span lang="es">Saltar al contenido</span><span lang="en">Skip to content</span></a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="index.html">~= the river &lt;3&gt;</a>
+      <nav aria-label="Principal / Main">
+        <ul class="nav">
+          <li><a href="index.html"><span lang="es">Inicio</span><span lang="en">Home</span></a></li>
+          <li><a href="download.html"><span lang="es">Descargar</span><span lang="en">Download</span></a></li>
+          <li><a href="security.html"><span lang="es">Seguridad</span><span lang="en">Security</span></a></li>
+          <li><a href="guide.html" aria-current="page"><span lang="es">Guía</span><span lang="en">Guide</span></a></li>
+        </ul>
+      </nav>
+      <button type="button" class="lang-btn" data-lang-toggle lang="en" aria-label="Switch to English">EN</button>
+    </div>
+  </header>
+  <main id="main">
+
+    <h1><span lang="es">Guía</span><span lang="en">Guide</span></h1>
+    <ul class="toc">
+      <li><a href="#client"><span lang="es">Comandos del cliente</span><span lang="en">Client commands</span></a></li>
+      <li><a href="#admin"><span lang="es">Comandos de admin</span><span lang="en">Admin commands</span></a></li>
+      <li><a href="#env"><span lang="es">Variables</span><span lang="en">Variables</span></a></li>
+      <li><a href="#server"><span lang="es">Montar un servidor</span><span lang="en">Running a server</span></a></li>
+    </ul>
+
+    <section id="client" aria-labelledby="h-client">
+      <h2 id="h-client"><span lang="es">Comandos del cliente</span><span lang="en">Client commands</span></h2>
+      <p lang="es">Escribe en el compositor <span class="prompt-user">usuario</span><span class="prompt-arrow">--&gt;</span>. Lo que no empieza por <code>/</code> va a la sala.</p>
+      <p lang="en">Type into the <span class="prompt-user">user</span><span class="prompt-arrow">--&gt;</span> composer. Anything not starting with <code>/</code> goes to the room.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col"><span lang="es">Comando</span><span lang="en">Command</span></th><th scope="col"><span lang="es">Descripción</span><span lang="en">Description</span></th></tr></thead>
+          <tbody>
+            <tr><td><code>/help</code></td><td><span lang="es">Lista los comandos locales.</span><span lang="en">Lists local commands.</span></td></tr>
+            <tr><td><code>/msg &lt;usuario&gt; &lt;texto&gt;</code></td><td><span lang="es">Mensaje privado cifrado de extremo a extremo. Alias: <code>/pm</code>, <code>/w</code>. Si el destinatario está desconectado, queda en cola.</span><span lang="en">End-to-end encrypted private message. Aliases: <code>/pm</code>, <code>/w</code>. Queued if the recipient is offline.</span></td></tr>
+            <tr><td><code>/r &lt;texto&gt;</code></td><td><span lang="es">Responde a la última conversación privada.</span><span lang="en">Replies to the last private conversation.</span></td></tr>
+            <tr><td><code>/users</code></td><td><span lang="es">Lista los nodos activos (alias <code>/who</code>).</span><span lang="en">Lists active nodes (alias <code>/who</code>).</span></td></tr>
+            <tr><td><code>/ping</code></td><td><span lang="es">Mide la latencia de ida y vuelta al servidor.</span><span lang="en">Measures round-trip latency to the server.</span></td></tr>
+            <tr><td><code>/clear</code></td><td><span lang="es">Limpia el feed local.</span><span lang="en">Clears the local feed.</span></td></tr>
+            <tr><td><code>/fingerprint [usuario]</code></td><td><span lang="es">Muestra tu huella de clave o la de otro usuario (alias <code>/fp</code>). Compárala por otro canal.</span><span lang="en">Shows your key fingerprint or another user's (alias <code>/fp</code>). Compare it over another channel.</span></td></tr>
+            <tr><td><code>/logout</code></td><td><span lang="es">Cierra la sesión y vuelve a la pantalla de acceso (alias <code>/quit</code>).</span><span lang="en">Closes the session and returns to the login screen (alias <code>/quit</code>).</span></td></tr>
+            <tr><td><code>/adminhelp</code></td><td><span lang="es">(Admins) Pide al servidor la lista de comandos de administración.</span><span lang="en">(Admins) Asks the server for the admin command list.</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3><span lang="es">Atajos</span><span lang="en">Shortcuts</span></h3>
+      <ul class="bullets">
+        <li lang="es"><kbd>↑</kbd> / <kbd>↓</kbd> recuperan líneas enviadas antes.</li>
+        <li lang="en"><kbd>↑</kbd> / <kbd>↓</kbd> recall previously sent lines.</li>
+        <li lang="es"><kbd>Tab</kbd> completa nombres de usuario.</li>
+        <li lang="en"><kbd>Tab</kbd> completes nicknames.</li>
+        <li lang="es">Clic derecho sobre un usuario de la lista: <em>Mensaje privado</em> o <em>Copiar nombre</em>.</li>
+        <li lang="en">Right-click a user in the node list: <em>Private message</em> or <em>Copy name</em>.</li>
+        <li lang="es">Botón <strong>Adjuntar</strong> para enviar imágenes, vídeos o archivos (hasta 12 MiB); doble clic sobre un adjunto para abrirlo (un toque en la vista compacta).</li>
+        <li lang="en"><strong>Attach</strong> button to send images, videos or files (up to 12 MiB); double-click an attachment to open it (single tap in compact layout).</li>
+        <li lang="es">Botón <strong>EN</strong>/<strong>ES</strong> en la barra azul para cambiar el idioma de la interfaz.</li>
+        <li lang="en"><strong>EN</strong>/<strong>ES</strong> button in the blue bar switches the interface language.</li>
+      </ul>
+      <p lang="es">Si se cae el enlace, el cliente vuelve a autenticarse solo con las credenciales de la sesión (guardadas únicamente en memoria). No lo hace tras un kick, un baneo, <code>/logout</code> o si la misma cuenta entra desde otra conexión.</p>
+      <p lang="en">If the link drops, the client re-authenticates on its own with the session credentials (kept in memory only). It does not after a kick, a ban, <code>/logout</code>, or when the same account signs in from another connection.</p>
+    </section>
+
+    <section id="admin" aria-labelledby="h-admin">
+      <h2 id="h-admin"><span lang="es">Comandos de administración</span><span lang="en">Admin commands</span></h2>
+      <p lang="es">Disponibles para cuentas admin desde el cliente gráfico o desde la consola <code>the_river_admin</code> (que además admite <code>/msg &lt;usuario&gt; &lt;texto&gt;</code>). Las acciones quedan auditadas.</p>
+      <p lang="en">Available to admin accounts from the graphical client or the <code>the_river_admin</code> console (which also supports <code>/msg &lt;user&gt; &lt;text&gt;</code>). Actions are audited.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col"><span lang="es">Comando</span><span lang="en">Command</span></th><th scope="col"><span lang="es">Descripción</span><span lang="en">Description</span></th></tr></thead>
+          <tbody>
+            <tr><td><code>/newuser</code></td><td><span lang="es">Crea una cuenta nueva con la clave inicial de <code>THE_RIVER_NEW_USER_PASSWORD</code>; el usuario la cambia en su primer acceso.</span><span lang="en">Creates a new account with the initial password from <code>THE_RIVER_NEW_USER_PASSWORD</code>; the user changes it on first login.</span></td></tr>
+            <tr><td><code>/passwd &lt;usuario&gt; &lt;clave&gt;</code></td><td><span lang="es">Cambia la contraseña de un usuario (debe cumplir la política: 12 a 128 caracteres).</span><span lang="en">Changes a user's password (must meet the policy: 12 to 128 characters).</span></td></tr>
+            <tr><td><code>/users</code></td><td><span lang="es">Usuarios conectados ahora.</span><span lang="en">Users online right now.</span></td></tr>
+            <tr><td><code>/accounts</code></td><td><span lang="es">Todas las cuentas registradas, con marcas <code>[admin]</code>, <code>[pendiente]</code>, <code>[sin hwid]</code>.</span><span lang="en">All registered accounts, flagged <code>[admin]</code>, <code>[pendiente]</code>, <code>[sin hwid]</code>.</span></td></tr>
+            <tr><td><code>/whois &lt;usuario&gt;</code></td><td><span lang="es">Estado, HWID, tiempo de sesión y huella de clave.</span><span lang="en">Status, HWID, session time and key fingerprint.</span></td></tr>
+            <tr><td><code>/kick &lt;usuario&gt; [razón]</code></td><td><span lang="es">Desconecta a un usuario.</span><span lang="en">Disconnects a user.</span></td></tr>
+            <tr><td><code>/banhwid &lt;hwid&gt; [razón]</code></td><td><span lang="es">Banea un HWID (recuerda: lo declara el cliente).</span><span lang="en">Bans an HWID (remember: it is client-reported).</span></td></tr>
+            <tr><td><code>/banuser &lt;usuario&gt; [razón]</code></td><td><span lang="es">Banea el HWID asociado a esa cuenta y la desconecta.</span><span lang="en">Bans the HWID bound to that account and disconnects it.</span></td></tr>
+            <tr><td><code>/unbanhwid &lt;hwid&gt;</code></td><td><span lang="es">Levanta un baneo de HWID.</span><span lang="en">Lifts an HWID ban.</span></td></tr>
+            <tr><td><code>/bans</code></td><td><span lang="es">Lista los HWID baneados.</span><span lang="en">Lists banned HWIDs.</span></td></tr>
+            <tr><td><code>/resethwid &lt;usuario&gt;</code></td><td><span lang="es">Libera el HWID de la cuenta; se asocia de nuevo en su próximo acceso.</span><span lang="en">Releases the account's HWID; it binds again on next login.</span></td></tr>
+            <tr><td><code>/deluser &lt;usuario&gt;</code></td><td><span lang="es">Elimina la cuenta y la expulsa; su acceso queda revocado al instante.</span><span lang="en">Deletes the account and kicks it; access is revoked immediately.</span></td></tr>
+            <tr><td><code>/announce &lt;texto&gt;</code></td><td><span lang="es">Envía un anuncio a toda la sala.</span><span lang="en">Sends an announcement to the whole room.</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="env" aria-labelledby="h-env">
+      <h2 id="h-env"><span lang="es">Variables de entorno</span><span lang="en">Environment variables</span></h2>
+      <p lang="es">Se leen del entorno o, si faltan, de <code>tor_data/runtime.env</code> / <code>.env.local</code> (carpeta actual o junto al ejecutable), una por línea en formato <code>NOMBRE=valor</code>.</p>
+      <p lang="en">They are read from the environment or, if missing, from <code>tor_data/runtime.env</code> / <code>.env.local</code> (current folder or next to the executable), one per line as <code>NAME=value</code>.</p>
+      <h3><span lang="es">Servidor</span><span lang="en">Server</span></h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col"><span lang="es">Variable</span><span lang="en">Variable</span></th><th scope="col"><span lang="es">Por defecto</span><span lang="en">Default</span></th><th scope="col"><span lang="es">Uso</span><span lang="en">Purpose</span></th></tr></thead>
+          <tbody>
+            <tr><td><code>THE_RIVER_AES_KEY</code></td><td>&mdash;</td><td><span lang="es"><strong>Obligatoria.</strong> 32+ caracteres aleatorios. Cifra en disco el historial y los registros. Solo servidor: nunca se entrega a los clientes.</span><span lang="en"><strong>Required.</strong> 32+ random characters. Encrypts history and logs at rest. Server only: never handed to clients.</span></td></tr>
+            <tr><td><code>THE_RIVER_ADMIN_BOOTSTRAP_PASSWORD</code></td><td>&mdash;</td><td><span lang="es"><strong>Obligatoria.</strong> Contraseña inicial de la cuenta admin. Cámbiala tras el primer arranque.</span><span lang="en"><strong>Required.</strong> Initial password of the admin account. Change it after first start.</span></td></tr>
+            <tr><td><code>THE_RIVER_NEW_USER_PASSWORD</code></td><td>&mdash;</td><td><span lang="es"><strong>Obligatoria.</strong> Clave inicial de un solo uso para cuentas creadas con <code>/newuser</code>.</span><span lang="en"><strong>Required.</strong> Single-use initial password for accounts created with <code>/newuser</code>.</span></td></tr>
+            <tr><td><code>THE_RIVER_ADMIN_USER</code></td><td><code>admin</code></td><td><span lang="es">Nombre de la cuenta administradora.</span><span lang="en">Name of the admin account.</span></td></tr>
+            <tr><td><code>THE_RIVER_DB</code></td><td><code>secure_river.db</code></td><td><span lang="es">Base de datos SQLite de usuarios, claves, historial y cola.</span><span lang="en">SQLite database for users, keys, history and queue.</span></td></tr>
+            <tr><td><code>THE_RIVER_LOG</code></td><td><code>chat_history.log</code></td><td><span lang="es">Registro de auditoría sellado.</span><span lang="en">Sealed audit log.</span></td></tr>
+            <tr><td><code>THE_RIVER_BIND_ADDR</code></td><td><code>127.0.0.1</code></td><td><span lang="es">Dirección de escucha. Déjala en loopback: Tor publica el servicio.</span><span lang="en">Listen address. Keep it on loopback: Tor publishes the service.</span></td></tr>
+            <tr><td><code>THE_RIVER_PORT</code></td><td><code>8888</code></td><td><span lang="es">Puerto TCP local del servidor (1&ndash;65535).</span><span lang="en">Server local TCP port (1&ndash;65535).</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3><span lang="es">Cliente y consola de admin</span><span lang="en">Client and admin console</span></h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col"><span lang="es">Variable</span><span lang="en">Variable</span></th><th scope="col"><span lang="es">Por defecto</span><span lang="en">Default</span></th><th scope="col"><span lang="es">Uso</span><span lang="en">Purpose</span></th></tr></thead>
+          <tbody>
+            <tr><td><code>THE_RIVER_ONION</code></td><td>&mdash;</td><td><span lang="es"><strong>Obligatoria.</strong> Dirección <code>.onion</code> del servidor. Es lo único que necesita el cliente.</span><span lang="en"><strong>Required.</strong> The server's <code>.onion</code> address. It is all the client needs.</span></td></tr>
+            <tr><td><code>THE_RIVER_CLIENT_LOG</code></td><td>&mdash;</td><td><span lang="es">Con <code>1</code>, escribe <code>client_runtime.log</code> para diagnóstico (sin mensajes ni credenciales).</span><span lang="en">With <code>1</code>, writes <code>client_runtime.log</code> for troubleshooting (no messages or credentials).</span></td></tr>
+            <tr><td><code>THE_RIVER_TOR_PROXY_PORT</code></td><td><code>9050</code></td><td><span lang="es">Puerto SOCKS5 de Tor. Con un valor distinto de 9050 el cliente no lanza Tor: debes tenerlo en marcha tú.</span><span lang="en">Tor SOCKS5 port. With anything other than 9050 the client does not launch Tor: you must run it yourself.</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note warn"><p class="tag" lang="es">Nunca en el cliente</p><p class="tag" lang="en">Never on clients</p>
+        <p lang="es">Con el protocolo 2 los clientes no usan <code>THE_RIVER_AES_KEY</code>. Si alguien te la pide para conectarte, desconfía. Tampoco compartas las contraseñas de arranque.</p>
+        <p lang="en">With protocol 2 clients do not use <code>THE_RIVER_AES_KEY</code>. If someone asks you for it in order to connect, be suspicious. Don't share the bootstrap passwords either.</p>
+      </div>
+    </section>
+
+    <section id="server" aria-labelledby="h-server">
+      <h2 id="h-server"><span lang="es">Montar un servidor</span><span lang="en">Running a server</span></h2>
+      <ol class="steps">
+        <li lang="es">Compila con <code>./build.sh</code> en <code>the_river_cpp/</code> (ver <a href="download.html#source">Compilar</a>).</li>
+        <li lang="en">Build with <code>./build.sh</code> in <code>the_river_cpp/</code> (see <a href="download.html#source">Build from source</a>).</li>
+        <li lang="es">Define los secretos en tu gestor de servicios o en un archivo privado, nunca en el repositorio.</li>
+        <li lang="en">Set the secrets in your service manager or a private file, never in the repository.</li>
+        <li lang="es">Configura un servicio oculto de Tor que apunte al puerto local del servidor (el cliente se conecta al puerto 80 del <code>.onion</code>).</li>
+        <li lang="en">Configure a Tor hidden service pointing at the server's local port (clients connect to port 80 of the <code>.onion</code>).</li>
+        <li lang="es">Arranca <code>./the_river_server</code>, entra como admin, cambia la contraseña y crea cuentas con <code>/newuser</code>.</li>
+        <li lang="en">Start <code>./the_river_server</code>, sign in as admin, change the password and create accounts with <code>/newuser</code>.</li>
+      </ol>
+<pre><code><span class="c"># entorno del servidor / server environment (ejemplo / example)</span>
+export THE_RIVER_AES_KEY="$(openssl rand -hex 32)"   <span class="c"># guárdala / keep it</span>
+export THE_RIVER_ADMIN_BOOTSTRAP_PASSWORD="&lt;cambia-esto&gt;"
+export THE_RIVER_NEW_USER_PASSWORD="&lt;clave-inicial&gt;"
+./the_river_server
+
+<span class="c"># torrc</span>
+HiddenServiceDir /var/lib/tor/the_river/
+HiddenServicePort 80 127.0.0.1:8888</code></pre>
+      <ul class="bullets">
+        <li lang="es">Guarda <code>THE_RIVER_AES_KEY</code>: si cambia, el historial sellado con la clave anterior deja de poder leerse.</li>
+        <li lang="en">Keep <code>THE_RIVER_AES_KEY</code>: if it changes, history sealed with the old key can no longer be read.</li>
+        <li lang="es">El directorio <code>HiddenServiceDir</code> contiene la clave privada del <code>.onion</code>. No lo subas a ningún repositorio; si se filtró, rota la dirección.</li>
+        <li lang="en">The <code>HiddenServiceDir</code> holds the <code>.onion</code> private key. Never commit it; if it leaked, rotate the address.</li>
+        <li lang="es">Al actualizar desde v1, las credenciales se migran a SCRAM en el primer arranque. Una fila que no pueda migrarse queda registrada y esa cuenta necesitará <code>/passwd</code>.</li>
+        <li lang="en">When upgrading from v1, credentials are migrated to SCRAM on first start. A row that cannot be migrated is logged and that account will need <code>/passwd</code>.</li>
+      </ul>
+      <h3><span lang="es">Consola de administración</span><span lang="en">Admin console</span></h3>
+      <p lang="es">La consola <code>the_river_admin</code> se conecta como cualquier cliente, a través de Tor: necesita <code>THE_RIVER_ONION</code> y un proxy Tor local (puerto 9050 o <code>THE_RIVER_TOR_PROXY_PORT</code>). Ejecútala, introduce tus credenciales de admin y escribe <code>/help</code>.</p>
+      <p lang="en">The <code>the_river_admin</code> console connects like any client, through Tor: it needs <code>THE_RIVER_ONION</code> and a local Tor proxy (port 9050 or <code>THE_RIVER_TOR_PROXY_PORT</code>). Run it, enter your admin credentials and type <code>/help</code>.</p>
+<pre><code>cd the_river/the_river_cpp
+THE_RIVER_ONION=&lt;tu-direccion&gt;.onion ./the_river_admin</code></pre>
+    </section>
+
+  </main>
+  <footer class="footbar">
+    <div class="footbar-inner">
+      <span class="foot-clock" data-clock aria-hidden="true"><span class="ye">---</span><span class="cy"> --:--:--</span></span>
+      <span><a href="https://github.com/jhulio435m/the_river">GitHub</a> &middot; <a href="https://github.com/jhulio435m/the_river/releases/latest">Releases</a> &middot; <span lang="es">Sin rastreadores ni analíticas.</span><span lang="en">No trackers, no analytics.</span></span>
+    </div>
+  </footer>
+</body>
+</html>

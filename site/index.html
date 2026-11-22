@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="es" data-title-es="The River — chat privado sobre Tor" data-title-en="The River — private chat over Tor">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The River — chat privado sobre Tor</title>
+  <meta name="description" content="The River: chat privado sobre Tor con mensajes privados cifrados de extremo a extremo, cliente retro para Windows, Linux y Termux.">
+  <meta name="theme-color" content="#0000a8">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main"><span lang="es">Saltar al contenido</span><span lang="en">Skip to content</span></a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="index.html">~= the river &lt;3&gt;</a>
+      <nav aria-label="Principal / Main">
+        <ul class="nav">
+          <li><a href="index.html" aria-current="page"><span lang="es">Inicio</span><span lang="en">Home</span></a></li>
+          <li><a href="download.html"><span lang="es">Descargar</span><span lang="en">Download</span></a></li>
+          <li><a href="security.html"><span lang="es">Seguridad</span><span lang="en">Security</span></a></li>
+          <li><a href="guide.html"><span lang="es">Guía</span><span lang="en">Guide</span></a></li>
+        </ul>
+      </nav>
+      <button type="button" class="lang-btn" data-lang-toggle lang="en" aria-label="Switch to English">EN</button>
+    </div>
+  </header>
+  <main id="main">
+
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <h1 id="hero-title">
+          <span lang="es">Chat privado sobre Tor, con estética de BBS.</span>
+          <span lang="en">Private chat over Tor, BBS style.</span>
+        </h1>
+        <p class="lead" lang="es">The River es una suite de chat en C++17: un servidor que vive como servicio oculto de Tor, un cliente gráfico ImGui para Windows, Linux y Termux, y una consola de administración. Sin cuentas públicas, sin direcciones IP expuestas.</p>
+        <p class="lead" lang="en">The River is a C++17 chat suite: a server that lives as a Tor hidden service, an ImGui desktop client for Windows, Linux and Termux, and an admin console. No public sign-up, no exposed IP addresses.</p>
+        <p lang="es">Los mensajes privados y los adjuntos van cifrados de extremo a extremo; el inicio de sesión usa SCRAM, así que el servidor nunca guarda tu contraseña ni nada equivalente.</p>
+        <p lang="en">Private messages and attachments are end-to-end encrypted; login uses SCRAM, so the server never stores your password or anything equivalent to it.</p>
+        <div class="btn-row">
+          <a class="btn" href="download.html"><span lang="es">&gt; Descargar el cliente</span><span lang="en">&gt; Download the client</span></a>
+          <a class="btn alt" href="security.html"><span lang="es">Modelo de seguridad</span><span lang="en">Security model</span></a>
+        </div>
+        <p class="muted" lang="es">Proyecto de comunidad privada: necesitas que un administrador te dé la dirección <code>.onion</code> y una cuenta.</p>
+        <p class="muted" lang="en">A private-community project: an administrator must give you the <code>.onion</code> address and an account.</p>
+      </div>
+
+      <figure class="term" data-term role="img" aria-label="Captura simulada del cliente: barra azul con usuarios activos, conversación en verde y magenta y el compositor user-->. / Simulated client screen: blue bar with active users, chat in lime and magenta, and the user--> composer." style="margin:0">
+        <div class="term-title" aria-hidden="true"><b>~= the river &lt;3&gt;</b>  [SECURE]  [Nodes: 3]</div>
+        <div class="term-head" aria-hidden="true">
+          <span><span lang="es">Usuarios activos 3 &lt;ENLACE SEGURO&gt;</span><span lang="en">Active Users 3 &lt;SECURE UPLINK&gt;</span></span>
+          <span><span class="status"><span lang="es">SEGURO</span><span lang="en">SECURE</span></span><span class="live"><span lang="es">ACTIVO</span><span lang="en">LIVE</span></span></span>
+        </div>
+        <div class="term-users-compact" aria-hidden="true"><span class="tag"><span lang="es">Ver usuarios</span><span lang="en">Show Users</span></span><span class="u-peer">ana</span> <span class="u-peer">kai</span> <span class="u-me">user</span></div>
+        <div class="term-body" aria-hidden="true">
+          <div class="term-users"><div class="u-peer">&nbsp;ana</div><div class="u-peer">&nbsp;kai</div><div class="u-me">&nbsp;user</div></div>
+          <div class="term-sep"></div>
+          <div class="term-feed">
+            <p class="u-sys" data-history><span lang="es">-- historial: últimos mensajes de la sala --</span><span lang="en">-- history: latest room messages --</span></p>
+            <p class="u-peer" data-history>&lt;ana&gt; <span lang="es">buenas, ¿alguien por el río?</span><span lang="en">hey, anyone down by the river?</span></p>
+            <p class="u-peer" data-history>&lt;kai&gt; <span lang="es">aquí, recién salido del circuito</span><span lang="en">here, fresh out of the circuit</span></p>
+            <p class="u-sys" data-history><span lang="es">user se unió</span><span lang="en">user joined</span></p>
+            <p class="u-me" data-type-es="hola río &lt;3" data-type-en="hello river &lt;3">&lt;user&gt; <span lang="es">hola río &lt;3</span><span lang="en">hello river &lt;3</span></p>
+            <p class="u-sys" data-type="/fingerprint kai"><span lang="es">Huella de kai: 7f3a-91c2-0be4-55d1-a8e0-3c77-e21b-4f90</span><span lang="en">kai fingerprint: 7f3a-91c2-0be4-55d1-a8e0-3c77-e21b-4f90</span></p>
+            <p class="u-pm" data-type-es="/msg kai ¿la huella cuadra?" data-type-en="/msg kai does the fingerprint match?"><span lang="es">[PM a kai] ¿la huella cuadra?</span><span lang="en">[PM to kai] does the fingerprint match?</span></p>
+            <p class="u-peer"><span lang="es">[PM de kai] cuadra. cifrado de extremo a extremo ;)</span><span lang="en">[PM from kai] it matches. end-to-end encrypted ;)</span></p>
+            <p class="u-peer">&lt;ana&gt; [<span lang="es">IMAGEN</span><span lang="en">IMAGE</span>] rio.png (2.1 MB)</p>
+          </div>
+        </div>
+        <div class="term-compose" aria-hidden="true">
+          <div class="term-input"><span class="prompt-user">user</span><span class="prompt-arrow">--&gt;</span> <span class="u-peer" data-term-typed></span><span class="cursor">&nbsp;</span></div>
+          <div class="term-attach"><span lang="es">Adjuntar</span><span lang="en">Attach</span></div>
+        </div>
+        <div class="term-foot" data-clock aria-hidden="true"><span class="ye">Sun Nov 22</span><span class="cy"> 00:00:00</span></div>
+      </figure>
+    </section>
+
+    <section aria-labelledby="feat-title">
+      <h2 id="feat-title"><span lang="es">Qué trae</span><span lang="en">What you get</span></h2>
+      <ul class="features">
+        <li><span class="k"><span lang="es">Servicio oculto de Tor</span><span lang="en">Tor hidden service</span></span>
+          <span lang="es">El servidor solo escucha en <code>127.0.0.1</code> y se publica como <code>.onion</code>. Los clientes llegan por un circuito Tor: nadie ve la IP del servidor ni la tuya. El cliente de escritorio trae Tor incluido.</span>
+          <span lang="en">The server listens on <code>127.0.0.1</code> only and is published as a <code>.onion</code>. Clients arrive through a Tor circuit: nobody sees the server's IP or yours. The desktop client ships with Tor bundled.</span></li>
+        <li><span class="k"><span lang="es">Login SCRAM</span><span lang="en">SCRAM login</span></span>
+          <span lang="es">Autenticación mutua estilo SCRAM-SHA-256. La base de datos guarda claves derivadas, nunca la contraseña ni un hash que sirva para entrar.</span>
+          <span lang="en">Mutual SCRAM-SHA-256 style authentication. The database keeps derived keys, never the password or a hash that could be replayed to log in.</span></li>
+        <li><span class="k"><span lang="es">Privados y adjuntos E2E</span><span lang="en">E2E private messages and attachments</span></span>
+          <span lang="es">Cada usuario tiene una clave X25519. Los <code>/msg</code> y los archivos se sellan con AES-256-GCM para el destinatario: el servidor solo reenvía sobres que no puede abrir.</span>
+          <span lang="en">Each user has an X25519 key. <code>/msg</code> messages and files are sealed with AES-256-GCM for the recipient: the server only forwards envelopes it cannot open.</span></li>
+        <li><span class="k"><span lang="es">Huellas de clave</span><span lang="en">Key fingerprints</span></span>
+          <span lang="es">Las claves se fijan la primera vez que se ven (TOFU) y el cliente avisa si cambian. Compara <code>/fingerprint</code> con tu contacto por otro canal.</span>
+          <span lang="en">Keys are pinned on first sight (TOFU) and the client warns when they change. Compare <code>/fingerprint</code> with your contact over another channel.</span></li>
+        <li><span class="k"><span lang="es">Historial y privados offline</span><span lang="en">History and offline PMs</span></span>
+          <span lang="es">Al entrar recibes los últimos 100 mensajes de la sala. Los privados a alguien desconectado quedan en cola (cifrados) hasta 7 días.</span>
+          <span lang="en">On login you get the latest 100 room messages. Private messages to someone offline are queued (still encrypted) for up to 7 days.</span></li>
+        <li><span class="k"><span lang="es">Consola de administración</span><span lang="en">Admin console</span></span>
+          <span lang="es">Crear cuentas, expulsar, banear por usuario o HWID, anuncios y <code>/whois</code> con huella, desde <code>the_river_admin</code>.</span>
+          <span lang="en">Create accounts, kick, ban by user or HWID, announcements and <code>/whois</code> with fingerprint, from <code>the_river_admin</code>.</span></li>
+        <li><span class="k">Windows / Linux / Termux</span>
+          <span lang="es">Binarios listos para Windows y Linux x86_64; en Android se compila dentro de Termux y corre en Termux:X11 con una vista compacta.</span>
+          <span lang="en">Ready-made binaries for Windows and Linux x86_64; on Android it builds inside Termux and runs in Termux:X11 with a compact layout.</span></li>
+        <li><span class="k"><span lang="es">Retro a propósito</span><span lang="en">Retro on purpose</span></span>
+          <span lang="es">Negro, azul BBS, magenta y lima. Comandos con <kbd>/</kbd>, historial con <kbd>↑</kbd>/<kbd>↓</kbd>, autocompletado con <kbd>Tab</kbd>. Interfaz en español o inglés.</span>
+          <span lang="en">Black, BBS blue, magenta and lime. Slash commands, <kbd>↑</kbd>/<kbd>↓</kbd> history, <kbd>Tab</kbd> completion. Spanish or English interface.</span></li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="start-title">
+      <h2 id="start-title"><span lang="es">Empezar en tres pasos</span><span lang="en">Get started in three steps</span></h2>
+      <ol class="steps">
+        <li lang="es">Descarga el zip de tu plataforma desde <a href="download.html">Descargar</a> y descomprímelo.</li>
+        <li lang="en">Download the zip for your platform from <a href="download.html">Download</a> and unpack it.</li>
+        <li lang="es">Crea <code>tor_data/runtime.env</code> con una sola línea: <code>THE_RIVER_ONION=&lt;tu-direccion&gt;.onion</code> (te la da el administrador).</li>
+        <li lang="en">Create <code>tor_data/runtime.env</code> with a single line: <code>THE_RIVER_ONION=&lt;your-address&gt;.onion</code> (your administrator gives it to you).</li>
+        <li lang="es">Abre el cliente, espera a que Tor conecte (la primera vez puede tardar ~2 minutos) y entra con la cuenta que te dieron. En el primer acceso eliges usuario y contraseña nuevos.</li>
+        <li lang="en">Open the client, wait for Tor to connect (up to ~2 minutes the first time) and sign in with the account you were given. On first login you choose a new username and password.</li>
+      </ol>
+      <div class="btn-row">
+        <a class="btn" href="download.html"><span lang="es">Ir a descargas</span><span lang="en">Go to downloads</span></a>
+        <a class="btn alt" href="guide.html"><span lang="es">Ver comandos</span><span lang="en">See commands</span></a>
+      </div>
+    </section>
+
+  </main>
+  <footer class="footbar">
+    <div class="footbar-inner">
+      <span class="foot-clock" data-clock aria-hidden="true"><span class="ye">---</span><span class="cy"> --:--:--</span></span>
+      <span><a href="https://github.com/jhulio435m/the_river">GitHub</a> &middot; <a href="https://github.com/jhulio435m/the_river/releases/latest">Releases</a> &middot; <span lang="es">Sin rastreadores ni analíticas.</span><span lang="en">No trackers, no analytics.</span></span>
+    </div>
+  </footer>
+</body>
+</html>
