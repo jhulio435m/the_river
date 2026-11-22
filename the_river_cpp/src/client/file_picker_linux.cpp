@@ -1,6 +1,7 @@
 #include "client/file_picker.h"
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -41,8 +42,17 @@ bool RunCommandCapture(const std::string& command, std::string& output, int& exi
     }
 
     std::array<char, 512> buffer{};
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
-        output += buffer.data();
+    while (true) {
+        if (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+            output += buffer.data();
+            continue;
+        }
+        // A signal (e.g. SIGCHLD) interrupting the read is not the end of the output.
+        if (ferror(pipe) && errno == EINTR) {
+            clearerr(pipe);
+            continue;
+        }
+        break;
     }
 
     exitCode = pclose(pipe);

@@ -218,7 +218,7 @@ void RenderConnectionScreen(ChatState& state,
                             float height,
                             ConnState connState,
                             const UiPalette& palette) {
-    const std::string statusDetail = state.StatusDetail();
+    const std::string statusDetail = state.StatusDetail(uiState.spanishUi);
     const float t = static_cast<float>(ImGui::GetTime());
     const bool compactLayout = IsCompactLayout(width);
     ImGui::SetCursorPos(ImVec2(0, 0));
@@ -259,8 +259,8 @@ void RenderCredentialChangeScreen(ChatClient& client,
                                   float height,
                                   ConnState connState,
                                   const UiPalette& palette) {
-    const std::string statusDetail = state.StatusDetail();
-    const std::string lastError = state.LastError();
+    const std::string statusDetail = state.StatusDetail(uiState.spanishUi);
+    const std::string lastError = state.LastError(uiState.spanishUi);
     const bool credentialPending = state.IsCredentialChangePending();
     const bool compactLayout = IsCompactLayout(width);
     const float panelWidth = ClampPanelWidth(width, 500.0f);
@@ -313,8 +313,8 @@ void RenderLoginScreen(ChatClient& client,
                        float height,
                        ConnState connState,
                        const UiPalette& palette) {
-    const std::string statusDetail = state.StatusDetail();
-    const std::string lastError = state.LastError();
+    const std::string statusDetail = state.StatusDetail(uiState.spanishUi);
+    const std::string lastError = state.LastError(uiState.spanishUi);
     const bool authPending = state.IsAuthActionPending();
     const bool compactLayout = IsCompactLayout(width);
     const float panelWidth = ClampPanelWidth(width, 440.0f);
@@ -423,11 +423,11 @@ void HandleAttachButton(ChatClient& client, ChatState& state, ClientUiState& uiS
         return;
     }
     if (!client.SendAttachment(currentIdentity, draft)) {
-        uiState.attachPickerError = state.LastError().empty()
+        uiState.attachPickerError = state.LastError(uiState.spanishUi).empty()
             ? Tr(uiState,
                  "The selected attachment could not be sent.",
                  "No se pudo enviar el adjunto seleccionado.")
-            : state.LastError();
+            : state.LastError(uiState.spanishUi);
         uiState.attachPickerOpen = true;
     }
 }
@@ -606,11 +606,11 @@ void RenderAttachmentModal(ChatClient& client, ChatState& state, ClientUiState& 
                 const std::string previewPath =
                     BuildAttachmentCachePath(attachment.ownerUser, attachment.id, attachment.displayName);
                 if (!client.RequestAttachment(attachment, previewPath, "preview"))
-                    uiState.attachmentModalError = state.LastError().empty()
+                    uiState.attachmentModalError = state.LastError(uiState.spanishUi).empty()
                         ? Tr(uiState,
                              "Could not request the preview.",
                              "No se pudo solicitar la previsualizacion.")
-                        : state.LastError();
+                        : state.LastError(uiState.spanishUi);
             }
             ImGui::SameLine();
         }

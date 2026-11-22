@@ -60,7 +60,7 @@ void ConfigureLinuxUi(GLFWwindow* window) {
 
     const std::string fontPath = FindPreferredMonospaceFont(RuntimePlatform::LinuxDesktop);
     if (!fontPath.empty()) {
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f * uiScale, nullptr, io.Fonts->GetGlyphRangesDefault());
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f * uiScale, nullptr, UiGlyphRanges());
     }
 }
 

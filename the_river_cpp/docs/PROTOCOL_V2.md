@@ -258,6 +258,14 @@ before reconnecting. `PING` is only sent after a verified `AUTH_OK`.
 ## 5. Other
 
 - `PING`/`PONG` both directions unchanged.
+- Client link liveness: the socket receive timeout (10 s) is only a polling
+  interval; an idle link is not a dead one. Once authenticated, the client sends
+  its own `PING` after 45 s without any frame (the resulting `PONG` is silent)
+  and closes/reconnects only after 90 s without a single frame. A `recv()`/`send()`
+  interrupted by a signal (EINTR) is retried, never treated as a link failure,
+  and client sockets are close-on-exec. `THE_RIVER_CLIENT_LINK_TIMEOUTS=<poll>,<keepalive>,<dead>`
+  (seconds) overrides these values; it exists for `tests/e2e_client_tests.cpp`
+  only.
 - Server → client `SYSTEM:` notices from the current code stay as they are.
 - Client config: only `THE_RIVER_ONION` is required. `THE_RIVER_AES_KEY` is
   required by the server only.

@@ -172,9 +172,9 @@ private:
     void ResetAuthExchange();
     bool SendAuthProof(const std::string& challengeLine);
     bool VerifyAuthOk(const std::string& line);
-    void FailAuthFatal(const std::string& reason);
+    void FailAuthFatal(const UiText& reason);
     // Fatal auth reasons stay on screen until the user submits a new login.
-    void SetStickyAuthError(const std::string& reason);
+    void SetStickyAuthError(const UiText& reason);
     void ApplyStickyAuthError();
 
     // Identity keys and E2E (sections 1.2, 3, 4.2).
@@ -247,8 +247,8 @@ private:
     std::string pendingLoginPass_;
     std::string rememberedUser_;
     std::string rememberedPass_;
-    std::string disconnectNotice_;
-    std::string stickyAuthError_;
+    UiText disconnectNotice_;
+    UiText stickyAuthError_;
     // Auth exchange of the current connection (guarded by reloginMutex_).
     std::string authClientNonce_;
     std::string authExpectedServerSig_;

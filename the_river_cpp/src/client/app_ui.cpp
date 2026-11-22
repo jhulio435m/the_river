@@ -7,6 +7,18 @@
 
 #include "client/ui_sections.h"
 
+const ImWchar* UiGlyphRanges() {
+    static const ImWchar kRanges[] = {
+        0x0020, 0x00FF,  // Basic Latin + Latin-1 Supplement (GetGlyphRangesDefault)
+        0x2010, 0x205E,  // General Punctuation: dashes, quotes, bullet, ellipsis
+        0x2190, 0x21FF,  // Arrows
+        0x2500, 0x257F,  // Box Drawing
+        0x2580, 0x259F,  // Block Elements (U+2588 in the connection screen)
+        0,
+    };
+    return kRanges;
+}
+
 void ApplyEliteStyle() {
     ImGuiStyle& s = ImGui::GetStyle();
     

@@ -105,7 +105,8 @@ int RunDriver() {
         } else if (op == "state") {
             std::cout << "STATE|conn=" << static_cast<int>(st.GetConnectionState()) << "|auth=" << st.IsAuthenticated()
                       << "|err=" << st.LastError() << "|newmsg=" << st.ConsumeNewMessageFlag()
-                      << "|id=" << st.CurrentIdentity() << "|\n";
+                      << "|id=" << st.CurrentIdentity() << "|status_en=" << st.StatusDetail(false)
+                      << "|status_es=" << st.StatusDetail(true) << "|err_en=" << st.LastError(false) << "|\n";
         } else if (op == "dump") {
             DumpLogs(st, shown);
         } else if (op == "quit") {
@@ -293,7 +294,8 @@ void SleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)
 // ---- client driver process
 class Driver {
 public:
-    Driver(const std::string& name, const std::string& hwid, const std::string& dir = "")
+    Driver(const std::string& name, const std::string& hwid, const std::string& dir = "",
+           const std::map<std::string, std::string>& extraEnv = {})
         : name_(name), dir_(dir.empty() ? e2e::MakeTempDir("river_e2e_drv_" + name + "_") : dir) {
         e2e::ChildOptions opt;
         opt.argv = {g_self, "--driver"};
@@ -304,6 +306,7 @@ public:
         opt.setEnv = {{"THE_RIVER_ONION", kOnion},
                       {"THE_RIVER_MACHINE_ID", hwid},
                       {"THE_RIVER_TOR_PROXY_PORT", std::to_string(g_shimPort)}};
+        for (const auto& [k, v] : extraEnv) opt.setEnv[k] = v;
         child_ = e2e::Spawn(opt);
         reader_ = std::thread([this] { ReadLoop(); });
     }
@@ -575,6 +578,60 @@ void RunFakeTests() {
         CHECK(e2e::FileExists(d.Dir() + "/river_identity_alice.key"), "F4 identity file river_identity_alice.key created");
         d.Quit();
         CloseFd(c);
+    }
+    {  // F6: idle link. Regression: the client used to treat its socket receive
+       // timeout as a dead link and reconnected ~60 s after connecting when the
+       // server's 30 s PING lost the race. The link timings are scaled down with
+       // THE_RIVER_CLIENT_LINK_TIMEOUTS=<poll>,<keepalive>,<dead> (seconds).
+        FakeListener fake;
+        Driver d("f6", Hwid(6), "", {{"THE_RIVER_CLIENT_LINK_TIMEOUTS", "1,2,4"}});
+        int c = fake.Accept();
+        d.Cmd("login alice CorrectHorse123");
+        const std::string am = FakeHandshake(c, cred, "alice", "F6");
+        SendText(c, "AUTH_OK:" + ServerSigB64(cred, am));
+        SendText(c, "SYSTEM: ACCESO CONCEDIDO.");
+        SendText(c, "SESSION:idle");
+        CHECK(d.WaitAuth(5000), "F6 authenticated");
+        // The server stays silent: several receive timeouts (1 s) pass without the
+        // client dropping the link; after 2 s idle it sends its own PING.
+        auto waitPing = [&](int timeoutMs) {
+            const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+            while (std::chrono::steady_clock::now() < end) {
+                const std::string l = RecvText(c, 250);
+                if (l == "PING") return std::string("PING");
+                if (l == "<EOF>") return l;
+            }
+            return std::string();
+        };
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string l = waitPing(6000);
+        const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        CHECK(l == "PING", "F6 idle client sends a keepalive PING instead of dropping the link (" + l + ")");
+        CHECK(idleMs >= 1000, "F6 link survived receive timeouts before the keepalive (" + std::to_string(idleMs) + " ms)");
+        CHECK(Contains(d.State(), "|auth=1|"), "F6 still authenticated while idle");
+        SendText(c, "PONG");
+        // A PONG counts as traffic: the next keepalive comes instead of a close.
+        l = waitPing(6000);
+        CHECK(l == "PING", "F6 PONG keeps the link alive, next keepalive follows (" + l + ")");
+        CHECK(!d.AnyLog([](const std::string& x) { return Contains(x, "PONG recibido"); }),
+              "F6 keepalive PONG is silent (no /ping latency line)");
+        int again = fake.Accept(200);
+        CHECK(again < 0, "F6 no reconnect while the link is alive");
+        CloseFd(again);
+        // No answer at all: after 4 s without any frame the link is declared dead.
+        const auto t1 = std::chrono::steady_clock::now();
+        l = RecvText(c, 8000);
+        while (l == "PING" || (!l.empty() && l != "<EOF>")) l = RecvText(c, 8000);
+        const auto deadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t1).count();
+        CHECK(l == "<EOF>" && deadMs >= 1000, "F6 silent server -> client closes the dead link (" + l + ", " +
+                                                  std::to_string(deadMs) + " ms)");
+        again = fake.Accept(5000);
+        CHECK(again >= 0, "F6 client reconnects after a dead link");
+        d.Quit();
+        CloseFd(c);
+        CloseFd(again);
     }
     {  // F5: CLIENTE OBSOLETO -> stop auto-login
         FakeListener fake;
@@ -998,8 +1055,17 @@ void RunRealScenario() {
     a->Cmd("login " + u1 + " InitialPass12345");
     CHECK(a->WaitState([](const std::string& l) { return Contains(l, "|conn=4|"); }, 20000),
           "R first login -> FIRST_LOGIN_REQUIRED");
+    {
+        // The first-access status follows the UI language (it used to be English only).
+        const std::string st = a->State();
+        CHECK(Contains(st, "|status_en=First access detected. You must change ID and key.|") &&
+                  Contains(st, "|status_es=Primer acceso detectado. Debes cambiar el ID y la clave.|"),
+              "R first-access status available in English and Spanish: " + st);
+    }
     const std::string weak = a->CmdRet("change alice weak");
     CHECK(StartsWith(weak, "RET|0|err=Clave demasiado debil"), "R weak password rejected locally (" + weak + ")");
+    CHECK(Contains(a->State(), "|err_en=Key too weak: use 12 to 128 characters"),
+          "R weak-password error also translated to English");
     a->Cmd("change alice AlicePassword123");
     CHECK(a->WaitState([](const std::string& l) { return Contains(l, "|auth=1|") && Contains(l, "|id=alice|"); },
                        30000),

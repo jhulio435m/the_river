@@ -151,7 +151,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     ImFontConfig font_cfg;
     font_cfg.FontDataOwnedByAtlas = false;
     // Courier New base para el look BBS.
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\cour.ttf", 26.0f, NULL, io.Fonts->GetGlyphRangesDefault());
+    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\cour.ttf", 26.0f, NULL, UiGlyphRanges());
     
     ApplyEliteStyle();
     ImGui_ImplWin32_InitForOpenGL(hwnd);

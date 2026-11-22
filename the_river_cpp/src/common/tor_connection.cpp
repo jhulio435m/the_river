@@ -1,5 +1,6 @@
 #include "common/tor_connection.h"
 
+#include <cerrno>
 #include <cstdint>
 #include <fstream>
 #include <mutex>
@@ -18,25 +19,18 @@ void AppendTorLog(const std::string& line) {
 }
 
 bool RecvExact(SocketHandle sock, char* buffer, int totalBytes) {
-    int received = 0;
-    while (received < totalBytes) {
-        int chunk = recv(sock, buffer + received, totalBytes - received, 0);
-        if (chunk <= 0) {
+    // The shared transport helper restarts recv() after EINTR.
+    if (totalBytes <= 0) return true;
+    if (::RecvExact(sock, buffer, static_cast<std::size_t>(totalBytes))) return true;
 #ifdef _WIN32
-            AppendTorLog("RecvExact fail chunk=" + std::to_string(chunk) +
-                         " wsa=" + std::to_string(WSAGetLastError()));
+    AppendTorLog("RecvExact fail wsa=" + std::to_string(WSAGetLastError()));
 #else
-            AppendTorLog("RecvExact fail chunk=" + std::to_string(chunk) +
-                         " errno=" + std::to_string(errno));
+    AppendTorLog("RecvExact fail errno=" + std::to_string(errno));
 #endif
-            return false;
-        }
-        received += chunk;
-    }
-    return true;
+    return false;
 }
 
-}
+}  // namespace
 
 #ifdef _WIN32
 #include <windows.h>
@@ -48,6 +42,7 @@ bool RecvExact(SocketHandle sock, char* buffer, int totalBytes) {
 #include <sys/types.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <poll.h>
 #endif
 
 namespace {
@@ -128,8 +123,30 @@ bool FileExists(const std::string& path) {
 }
 #endif
 
+// connect() interrupted by a signal keeps connecting in the background
+// (POSIX): wait for it to finish instead of reporting a failure.
+bool ConnectRestartingOnSignal(SocketHandle sock, const sockaddr_in& addr) {
+    if (connect(sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0) return true;
+#ifdef _WIN32
+    return false;
+#else
+    if (errno != EINTR) return false;
+    while (true) {
+        pollfd p{sock, POLLOUT, 0};
+        const int r = poll(&p, 1, 30000);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return false;
+        int soError = 0;
+        socklen_t len = sizeof(soError);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soError, &len) != 0) return false;
+        errno = soError;
+        return soError == 0;
+    }
+#endif
+}
+
 bool ProbeProxyListening(const std::string& ip, int port) {
-    SocketHandle s = socket(AF_INET, SOCK_STREAM, 0);
+    SocketHandle s = CreateTcpSocket();
     if (!IsSocketValid(s)) return false;
 
     sockaddr_in addr{};
@@ -239,7 +256,8 @@ void TerminateLocalTor() {
 SocketHandle ConnectViaTor(const TorEndpoint& endpoint, int recvTimeoutSeconds) {
     AppendTorLog("ConnectViaTor begin onion=" + endpoint.onionAddress +
                  " proxy=" + endpoint.proxyIp + ":" + std::to_string(endpoint.proxyPort));
-    SocketHandle sock = socket(AF_INET, SOCK_STREAM, 0);
+    // Not inherited by the helpers the client spawns (file pickers, openers).
+    SocketHandle sock = CreateTcpSocket();
     if (!IsSocketValid(sock)) {
         AppendTorLog("socket() invalid");
         return kInvalidSocket;
@@ -258,7 +276,7 @@ SocketHandle ConnectViaTor(const TorEndpoint& endpoint, int recvTimeoutSeconds) 
     addr.sin_port = htons(endpoint.proxyPort);
     inet_pton(AF_INET, endpoint.proxyIp.c_str(), &addr.sin_addr);
 
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+    if (!ConnectRestartingOnSignal(sock, addr)) {
 #ifdef _WIN32
         AppendTorLog("connect(proxy) failed wsa=" + std::to_string(WSAGetLastError()));
 #else
@@ -270,7 +288,7 @@ SocketHandle ConnectViaTor(const TorEndpoint& endpoint, int recvTimeoutSeconds) 
     AppendTorLog("connect(proxy) ok");
 
     char hello[] = {0x05, 0x01, 0x00};
-    if (send(sock, hello, 3, 0) != 3) {
+    if (!SendAll(sock, hello, sizeof(hello))) {
         AppendTorLog("send(hello) failed");
         CloseSocketHandle(sock);
         return kInvalidSocket;
@@ -292,7 +310,7 @@ SocketHandle ConnectViaTor(const TorEndpoint& endpoint, int recvTimeoutSeconds) 
     for (char c : endpoint.onionAddress) request.push_back(c);
     request.push_back((char)((endpoint.onionPort >> 8) & 0xFF));
     request.push_back((char)(endpoint.onionPort & 0xFF));
-    if (send(sock, request.data(), (int)request.size(), 0) != (int)request.size()) {
+    if (!SendAll(sock, request.data(), request.size())) {
         AppendTorLog("send(connect request) failed");
         CloseSocketHandle(sock);
         return kInvalidSocket;

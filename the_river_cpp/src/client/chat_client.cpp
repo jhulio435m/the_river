@@ -62,6 +62,67 @@ void AppendClientLog(const std::string& line) {
     out << line << "\n";
 }
 
+// Liveness of the server link. The socket's receive timeout is only a polling
+// interval: an expiry with nothing received means "idle", not "dead". Once
+// authenticated the client sends its own PING after keepaliveSec without any
+// frame (the server PINGs every 30 s and answers PING with PONG), and the link
+// is declared dead only after deadSec without a single frame.
+struct LinkTimings {
+    int pollSec = 10;
+    int keepaliveSec = 45;
+    int deadSec = 90;
+};
+
+// THE_RIVER_CLIENT_LINK_TIMEOUTS="<poll>,<keepalive>,<dead>" (seconds) overrides
+// the defaults. Test-only knob (tests/e2e_client_tests.cpp uses it to exercise
+// the keepalive and dead-link paths in a few seconds); not meant for users.
+LinkTimings ClientLinkTimings() {
+    static const LinkTimings timings = [] {
+        LinkTimings t;
+        const char* value = std::getenv("THE_RIVER_CLIENT_LINK_TIMEOUTS");
+        if (value == nullptr) return t;
+        int poll = 0, keepalive = 0, dead = 0;
+        if (std::sscanf(value, "%d,%d,%d", &poll, &keepalive, &dead) == 3 && poll > 0 && keepalive > 0 &&
+            dead > keepalive) {
+            t.pollSec = poll;
+            t.keepaliveSec = keepalive;
+            t.deadSec = dead;
+        }
+        return t;
+    }();
+    return timings;
+}
+
+void SetSocketRecvTimeout(SocketHandle sock, int seconds) {
+#ifdef _WIN32
+    DWORD timeoutMs = static_cast<DWORD>(seconds) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+#else
+    timeval tv{};
+    tv.tv_sec = seconds;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+// Server notices shown on the login screen (the text after "SYSTEM: "): the
+// server speaks Spanish; known notices get their English text, an admin's free
+// text reason after them is kept as is.
+UiText ServerNoticeText(const std::string& notice) {
+    static const std::pair<const char*, const char*> kKnown[] = {
+        {"SESION REEMPLAZADA. Tu identidad inicio sesion desde otra conexion.",
+         "SESSION REPLACED. Your identity signed in from another connection."},
+        {"TIEMPO DE AUTENTICACION AGOTADO.", "AUTHENTICATION TIME LIMIT EXCEEDED."},
+        {"LIMITE DE TRAFICO EXCEDIDO.", "TRAFFIC LIMIT EXCEEDED."},
+        {"ACCESO BLOQUEADO.", "ACCESS BLOCKED."},
+        {"SESION REEMPLAZADA.", "SESSION REPLACED."},
+    };
+    for (const auto& [es, en] : kKnown) {
+        const std::string prefix = es;
+        if (notice.compare(0, prefix.size(), prefix) == 0) return UiText(en + notice.substr(prefix.size()), notice);
+    }
+    return UiText(notice);
+}
+
 std::string GenerateAttachmentId() {
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -173,6 +234,7 @@ constexpr const char* kUnverifiedPrefix = "[clave no verificada] ";
 constexpr const char* kKnownKeysFile = "river_known_keys.txt";
 constexpr int kMaxKnownKeyLines = 10000;
 constexpr const char* kIncompatibleServerError = "Servidor incompatible (se requiere protocolo 2).";
+constexpr const char* kIncompatibleServerErrorEn = "Incompatible server (protocol 2 required).";
 
 bool FileExists(const std::string& path) {
     if (path.empty()) return false;
@@ -430,7 +492,7 @@ ChatClient::~ChatClient() {
 void ChatClient::Start() {
     if (networkThread_.joinable()) return;
     stopRequested_.store(false);
-    state_.SetStatusDetail("Inicializando cliente seguro...");
+    state_.SetStatusDetail(UiText("Initializing secure client...", "Inicializando cliente seguro..."));
     state_.ClearLastError();
     networkThread_ = std::thread(&ChatClient::NetworkLoop, this);
 }
@@ -697,7 +759,7 @@ bool ChatClient::VerifyAuthOk(const std::string& line) {
     return ok;
 }
 
-void ChatClient::FailAuthFatal(const std::string& reason) {
+void ChatClient::FailAuthFatal(const UiText& reason) {
     AppendClientLog("Auth fatal");
     // Never retry these credentials automatically against a server that could
     // not prove it knows them.
@@ -714,17 +776,17 @@ void ChatClient::FailAuthFatal(const std::string& reason) {
     state_.SetCredentialChangePending(false);
     state_.SetMustChangeCredentials(false);
     state_.SetLastError(reason);
-    state_.AddSystemLog("SYSTEM: " + reason);
+    state_.AddSystemLog("SYSTEM: " + reason.es);
     CloseCurrentSocket();
 }
 
-void ChatClient::SetStickyAuthError(const std::string& reason) {
+void ChatClient::SetStickyAuthError(const UiText& reason) {
     std::lock_guard<std::mutex> lock(reloginMutex_);
     stickyAuthError_ = reason;
 }
 
 void ChatClient::ApplyStickyAuthError() {
-    std::string reason;
+    UiText reason;
     {
         std::lock_guard<std::mutex> lock(reloginMutex_);
         reason = stickyAuthError_;
@@ -776,21 +838,21 @@ bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
     AppendClientLog("SendLogin");
     if (bannerState_.load() == 2) {
         state_.SetAuthActionPending(false);
-        state_.SetLastError(kIncompatibleServerError);
+        state_.SetLastError(UiText(kIncompatibleServerErrorEn, kIncompatibleServerError));
         return false;
     }
     if (user.empty() || user.size() > 64 || user.find_first_of(":|\r\n") != std::string::npos || pass.empty()) {
         state_.SetAuthActionPending(false);
-        state_.SetLastError("Identificador o clave invalidos.");
+        state_.SetLastError(UiText("Invalid ID or key.", "Identificador o clave invalidos."));
         return false;
     }
     state_.SetAuthActionPending(true);
     state_.SetConnectionState(ConnState::AUTHENTICATING);
-    state_.SetStatusDetail("Autenticando credenciales...");
+    state_.SetStatusDetail(UiText("Authenticating credentials...", "Autenticando credenciales..."));
     if (bannerState_.load() == 0) {
         // The server has not confirmed PROTO=2 yet: log in once its banner arrives.
         QueueAutoLogin(user, pass);
-        state_.SetStatusDetail("Esperando banner del servidor...");
+        state_.SetStatusDetail(UiText("Waiting for the server banner...", "Esperando banner del servidor..."));
         return true;
     }
 
@@ -807,8 +869,9 @@ bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
     if (nonce.empty() || hwid.find_first_of(":|") != std::string::npos ||
         SendRawLine("[AUTH_START]:2:" + user + ":" + hwid + ":" + nonce + "\n") < 0) {
         state_.SetAuthActionPending(false);
-        state_.SetLastError("No hay canal disponible para enviar el login.");
-        state_.SetStatusDetail("Sin enlace activo hacia el servidor.");
+        state_.SetLastError(UiText("No channel available to send the login.",
+                                   "No hay canal disponible para enviar el login."));
+        state_.SetStatusDetail(UiText("No active link to the server.", "Sin enlace activo hacia el servidor."));
         return false;
     }
     return true;
@@ -817,34 +880,38 @@ bool ChatClient::SendLogin(const std::string& user, const std::string& pass) {
 bool ChatClient::SendFirstLoginChange(const std::string& newUser, const std::string& newPass) {
     state_.ClearLastError();
     if (!IsValidUsername(newUser)) {
-        state_.SetLastError("Identificador invalido: 3-24 caracteres (letras, numeros, '_' o '-').");
+        state_.SetLastError(UiText("Invalid ID: 3-24 characters (letters, digits, '_' or '-').",
+                                   "Identificador invalido: 3-24 caracteres (letras, numeros, '_' o '-')."));
         return false;
     }
     if (!IsStrongEnoughPassword(newPass)) {
-        state_.SetLastError("Clave demasiado debil: usa entre 12 y 128 caracteres y no incluyas ':'.");
+        state_.SetLastError(UiText("Key too weak: use 12 to 128 characters and do not include ':'.",
+                                   "Clave demasiado debil: usa entre 12 y 128 caracteres y no incluyas ':'."));
         return false;
     }
     if (!authVerified_.load()) {
-        state_.SetLastError("No hay una autenticacion verificada para actualizar credenciales.");
+        state_.SetLastError(UiText("No verified authentication to update the credentials.",
+                                   "No hay una autenticacion verificada para actualizar credenciales."));
         return false;
     }
     // The password never leaves the client: only the SCRAM credential is sent.
     river::scram::Credential credential;
     if (!river::scram::MakeCredential(newPass, credential)) {
-        state_.SetLastError("No se pudo derivar la nueva credencial.");
+        state_.SetLastError(UiText("Could not derive the new credential.", "No se pudo derivar la nueva credencial."));
         return false;
     }
     state_.SetCredentialChangePending(true);
     state_.SetConnectionState(ConnState::UPDATING_CREDENTIALS);
-    state_.SetStatusDetail("Actualizando identidad inicial...");
+    state_.SetStatusDetail(UiText("Updating the initial identity...", "Actualizando identidad inicial..."));
     QueueAutoLogin(newUser, newPass);
     if (SendRawLine("[CHANGE2]:" + newUser + ":" + credential.saltHex + ":" +
                     std::to_string(credential.iterations) + ":" + credential.storedKeyHex + ":" +
                     credential.serverKeyHex + "\n") < 0) {
         state_.SetCredentialChangePending(false);
         QueueAutoLogin("", "");
-        state_.SetLastError("Could not send the initial credential change.");
-        state_.SetStatusDetail("Sin enlace activo hacia el servidor.");
+        state_.SetLastError(UiText("Could not send the initial credential change.",
+                                   "No se pudo enviar el cambio inicial de credenciales."));
+        state_.SetStatusDetail(UiText("No active link to the server.", "Sin enlace activo hacia el servidor."));
         return false;
     }
     return true;
@@ -853,7 +920,8 @@ bool ChatClient::SendFirstLoginChange(const std::string& newUser, const std::str
 bool ChatClient::SendPing() {
     if (!authVerified_.load()) {
         // The server does not answer PING before AUTH_OK.
-        state_.SetLastError("Sin sesion autenticada: PING no disponible.");
+        state_.SetLastError(UiText("No authenticated session: PING unavailable.",
+                                   "Sin sesion autenticada: PING no disponible."));
         return false;
     }
     {
@@ -864,7 +932,7 @@ bool ChatClient::SendPing() {
     if (SendRawLine("PING\n") < 0) {
         std::lock_guard<std::mutex> lock(pingMutex_);
         pingOutstanding_ = false;
-        state_.SetLastError("Could not send PING to the server.");
+        state_.SetLastError(UiText("Could not send PING to the server.", "No se pudo enviar PING al servidor."));
         return false;
     }
     return true;
@@ -872,11 +940,12 @@ bool ChatClient::SendPing() {
 
 bool ChatClient::SendChatMessage(const std::string& /*user*/, const std::string& input) {
     if (input.size() > kMaxRoomTextBytes) {
-        state_.SetLastError("Mensaje demasiado largo (maximo 8 KiB).");
+        state_.SetLastError(UiText("Message too long (8 KiB maximum).", "Mensaje demasiado largo (maximo 8 KiB)."));
         return false;
     }
     if (SendRawLine("[MSG]:" + river::base64::EncodeString(input) + "\n") < 0) {
-        state_.SetLastError("Could not send the message. Channel unavailable.");
+        state_.SetLastError(UiText("Could not send the message. Channel unavailable.",
+                                   "No se pudo enviar el mensaje. Canal no disponible."));
         return false;
     }
     return true;
@@ -884,11 +953,12 @@ bool ChatClient::SendChatMessage(const std::string& /*user*/, const std::string&
 
 bool ChatClient::SendPrivateMessage(const std::string& /*fromUser*/, const std::string& target, const std::string& message) {
     if (!HasIdentity()) {
-        state_.SetLastError("No hay clave de identidad cargada: los mensajes privados requieren una sesion activa.");
+        state_.SetLastError(UiText("No identity key loaded: private messages need an active session.",
+                                   "No hay clave de identidad cargada: los mensajes privados requieren una sesion activa."));
         return false;
     }
     if (!SendSealedToUser(target, message, false)) {
-        state_.SetLastError("Could not send the private message.");
+        state_.SetLastError(UiText("Could not send the private message.", "No se pudo enviar el mensaje privado."));
         return false;
     }
     return true;
@@ -983,7 +1053,7 @@ void ChatClient::PublishIdentityKey() {
     const std::string pub = OwnPublicKey();
     if (pub.empty()) return;
     if (SendRawLine("[KEY_SET]:" + river::base64::EncodeString(pub) + "\n") < 0) {
-        state_.SetLastError("No se pudo publicar la clave publica.");
+        state_.SetLastError(UiText("Could not publish the public key.", "No se pudo publicar la clave publica."));
     }
 }
 
@@ -1664,15 +1734,17 @@ void ChatClient::HandleRoomLine(const std::string& rest, bool fromHistory) {
 
 bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDraft& attachment) {
     if (fromUser.empty()) {
-        state_.SetLastError("No hay identidad autenticada para enviar adjuntos.");
+        state_.SetLastError(UiText("No authenticated identity to send attachments.",
+                                   "No hay identidad autenticada para enviar adjuntos."));
         return false;
     }
     if (attachment.localPath.empty() || attachment.displayName.empty()) {
-        state_.SetLastError("Invalid attachment.");
+        state_.SetLastError(UiText("Invalid attachment.", "Adjunto invalido."));
         return false;
     }
     if (attachment.sizeBytes > kMaxAttachmentBytes) {
-        state_.SetLastError("Attachment too large. Current limit: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".");
+        state_.SetLastError(UiText("Attachment too large. Current limit: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".",
+                                   "Adjunto demasiado grande. Limite actual: " + FormatAttachmentSize(kMaxAttachmentBytes) + "."));
         return false;
     }
 
@@ -1691,11 +1763,12 @@ bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDra
                     std::to_string(attachment.sizeBytes) + "\n") < 0) {
         std::lock_guard<std::mutex> lock(offeredAttachmentMutex_);
         offeredAttachments_.erase(id);
-        state_.SetLastError("Could not announce the attachment.");
+        state_.SetLastError(UiText("Could not announce the attachment.", "No se pudo anunciar el adjunto."));
         return false;
     }
 
-    state_.SetStatusDetail("Attachment announced: " + attachment.displayName);
+    state_.SetStatusDetail(UiText("Attachment announced: " + attachment.displayName,
+                                  "Adjunto anunciado: " + attachment.displayName));
     state_.ClearLastError();
     return true;
 }
@@ -1703,11 +1776,12 @@ bool ChatClient::SendAttachment(const std::string& fromUser, const AttachmentDra
 bool ChatClient::RequestAttachment(const AttachmentPayload& attachment, const std::string& savePath, const std::string& mode) {
     if (attachment.ownerUser.empty() || !IsValidAttachmentId(attachment.id) || savePath.empty() ||
         mode.find_first_of("|:") != std::string::npos) {
-        state_.SetLastError("Solicitud de adjunto invalida.");
+        state_.SetLastError(UiText("Invalid attachment request.", "Solicitud de adjunto invalida."));
         return false;
     }
     if (attachment.sizeBytes > kMaxAttachmentBytes) {
-        state_.SetLastError("Attachment too large. Current limit: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".");
+        state_.SetLastError(UiText("Attachment too large. Current limit: " + FormatAttachmentSize(kMaxAttachmentBytes) + ".",
+                                   "Adjunto demasiado grande. Limite actual: " + FormatAttachmentSize(kMaxAttachmentBytes) + "."));
         return false;
     }
 
@@ -1744,7 +1818,7 @@ bool ChatClient::RequestAttachment(const AttachmentPayload& attachment, const st
         }
         DiscardIncomingTransfer(dropped);
         state_.UpdateAttachmentState(attachment.ownerUser, attachment.id, AttachmentTransferState::Available);
-        state_.SetLastError("Could not request the attachment.");
+        state_.SetLastError(UiText("Could not request the attachment.", "No se pudo solicitar el adjunto."));
         return false;
     }
     return true;
@@ -1899,7 +1973,8 @@ void ChatClient::FinishIncomingAttachment(IncomingAttachmentTransfer transfer) {
                                  transfer.attachment.id,
                                  AttachmentTransferState::Received,
                                  transfer.targetPath);
-    state_.SetStatusDetail("Attachment received: " + transfer.attachment.displayName);
+    state_.SetStatusDetail(UiText("Attachment received: " + transfer.attachment.displayName,
+                                  "Adjunto recibido: " + transfer.attachment.displayName));
     state_.AddSystemLog("SYSTEM: Attachment received and saved to " + transfer.targetPath);
     if (transfer.attachment.kind != AttachmentKind::File &&
         !IsAttachmentSafeToOpen(transfer.attachment.kind, transfer.targetPath)) {
@@ -2028,7 +2103,8 @@ bool ChatClient::HandleAttachmentPrivateControl(const std::string& sender,
         }
         DiscardIncomingTransfer(dropped);
         state_.UpdateAttachmentState(sender, parts[1], AttachmentTransferState::Failed);
-        state_.SetLastError(errorText.empty() ? "Could not transfer the attachment." : errorText);
+        state_.SetLastError(errorText.empty() ? UiText("Could not transfer the attachment.", "No se pudo transferir el adjunto.")
+                                           : UiText(errorText));
         return true;
     }
 
@@ -2144,6 +2220,10 @@ bool ChatClient::HandleAttachmentChunkFrame(const std::string& payload) {
 
 void ChatClient::ReceiveLoop(SocketHandle sock) {
     AppendClientLog("ReceiveLoop start");
+    const LinkTimings timings = ClientLinkTimings();
+    SetSocketRecvTimeout(sock, timings.pollSec);
+    auto lastFrameAt = std::chrono::steady_clock::now();
+    bool keepaliveSent = false;
     while (!stopRequested_.load()) {
         // Key requests made while handling a burst of lines (e.g. the offline
         // PMs after login) are coalesced: they go out as batch KEY_GET lines
@@ -2190,10 +2270,32 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         }
         std::uint16_t frameType = 0;
         std::string line;
-        if (!RecvFrame(sock, frameType, line, 1024 * 1024)) {
-            AppendClientLog("ReceiveLoop frame read failed");
+        const RecvStatus status = RecvFrameOrTimeout(sock, frameType, line, 1024 * 1024);
+        if (status == RecvStatus::kTimeout) {
+            // Idle link (SO_RCVTIMEO is only the polling interval).
+            const auto idleSec = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - lastFrameAt).count();
+            if (idleSec >= timings.deadSec) {
+                AppendClientLog("ReceiveLoop link silent for " + std::to_string(idleSec) + " s; closing");
+                break;
+            }
+            if (!keepaliveSent && idleSec >= timings.keepaliveSec && authVerified_.load()) {
+                // Silent keep-alive: the PONG is ignored (no /ping outstanding).
+                AppendClientLog("ReceiveLoop keepalive PING");
+                keepaliveSent = SendRawLine("PING\n") >= 0;
+            }
+            continue;
+        }
+        if (status != RecvStatus::kOk) {
+#ifdef _WIN32
+            AppendClientLog("ReceiveLoop frame read failed wsa=" + std::to_string(WSAGetLastError()));
+#else
+            AppendClientLog("ReceiveLoop frame read failed errno=" + std::to_string(errno));
+#endif
             break;
         }
+        lastFrameAt = std::chrono::steady_clock::now();
+        keepaliveSent = false;
 
         if (frameType == kFrameTypeAttachmentChunk) {
             HandleAttachmentChunkFrame(line);
@@ -2240,31 +2342,36 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
         } else if (line.rfind("AUTH_CHALLENGE2:", 0) == 0) {
             AppendClientLog("ReceiveLoop line=AUTH_CHALLENGE2");
             if (!SendAuthProof(line)) {
-                FailAuthFatal("No se pudo completar el reto de autenticacion.");
+                FailAuthFatal(UiText("Could not complete the authentication challenge.",
+                                     "No se pudo completar el reto de autenticacion."));
                 break;
             }
         } else if (line.rfind("AUTH_OK:", 0) == 0) {
             AppendClientLog("ReceiveLoop line=AUTH_OK");
             if (!VerifyAuthOk(line)) {
-                FailAuthFatal("Firma del servidor invalida: autenticacion mutua fallida. Conexion cerrada.");
+                FailAuthFatal(UiText("Invalid server signature: mutual authentication failed. Connection closed.",
+                                     "Firma del servidor invalida: autenticacion mutua fallida. Conexion cerrada."));
                 break;
             }
         } else if (IsSystemNotice(line, "FIRST LOGIN")) {
             AppendClientLog("ReceiveLoop line=FIRST LOGIN");
             if (!authVerified_.load()) {
-                FailAuthFatal("El servidor no verifico su identidad (falta AUTH_OK valido). Conexion cerrada.");
+                FailAuthFatal(UiText("The server did not prove its identity (no valid AUTH_OK). Connection closed.",
+                                     "El servidor no verifico su identidad (falta AUTH_OK valido). Conexion cerrada."));
                 break;
             }
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
             state_.SetMustChangeCredentials(true);
             state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
-            state_.SetStatusDetail("First access detected. You must change ID and key.");
+            state_.SetStatusDetail(UiText("First access detected. You must change ID and key.",
+                                          "Primer acceso detectado. Debes cambiar el ID y la clave."));
             state_.ClearLastError();
         } else if (IsSystemNotice(line, "ACCESO CONCEDIDO")) {
             AppendClientLog("ReceiveLoop line=ACCESO CONCEDIDO");
             if (!authVerified_.load()) {
-                FailAuthFatal("El servidor no verifico su identidad (falta AUTH_OK valido). Conexion cerrada.");
+                FailAuthFatal(UiText("The server did not prove its identity (no valid AUTH_OK). Connection closed.",
+                                     "El servidor no verifico su identidad (falta AUTH_OK valido). Conexion cerrada."));
                 break;
             }
             // Credentials the identity file is protected with (new ones after a
@@ -2293,35 +2400,37 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
             state_.SetConnectionState(ConnState::AUTHENTICATED);
-            state_.SetStatusDetail("Canal seguro autenticado.");
+            state_.SetStatusDetail(UiText("Secure channel authenticated.", "Canal seguro autenticado."));
             state_.ClearLastError();
             if (LoadOrCreateIdentity(loginUser, loginPass, oldUser, oldPass)) {
                 PublishIdentityKey();
             } else {
-                state_.SetLastError("No se pudo preparar la clave de identidad: los mensajes privados no estaran disponibles.");
+                state_.SetLastError(UiText("Could not prepare the identity key: private messages will not be available.",
+                                           "No se pudo preparar la clave de identidad: los mensajes privados no estaran disponibles."));
             }
             WipeString(loginPass);
             WipeString(oldPass);
         } else if (line.rfind("SESSION:", 0) == 0) {
             AppendClientLog("ReceiveLoop line=SESSION");
-            state_.SetStatusDetail("Sesion segura activa.");
+            state_.SetStatusDetail(UiText("Secure session active.", "Sesion segura activa."));
         } else if (IsSystemNotice(line, "UPLINK ESTABLISHED")) {
             AppendClientLog("ReceiveLoop line=UPLINK ESTABLISHED");
             state_.SetConnectionState(ConnState::TOR_READY);
             if (!BannerHasProto2(line)) {
                 AppendClientLog("ReceiveLoop incompatible protocol");
                 bannerState_.store(2);
-                SetStickyAuthError(kIncompatibleServerError);
+                SetStickyAuthError(UiText(kIncompatibleServerErrorEn, kIncompatibleServerError));
                 backoffCancel_.store(false);
                 reconnectDelaySeconds_.store(kFatalAuthBackoffSeconds);  // if the server drops us, do not hammer it
                 state_.SetAuthActionPending(false);
-                state_.SetStatusDetail("Servidor incompatible.");
-                state_.SetLastError(kIncompatibleServerError);
+                state_.SetStatusDetail(UiText("Incompatible server.", "Servidor incompatible."));
+                state_.SetLastError(UiText(kIncompatibleServerErrorEn, kIncompatibleServerError));
                 state_.AddSystemLog(std::string("SYSTEM: ") + kIncompatibleServerError);
                 continue;
             }
             bannerState_.store(1);
-            state_.SetStatusDetail("Canal Tor establecido. Esperando login.");
+            state_.SetStatusDetail(UiText("Tor channel established. Waiting for login.",
+                                          "Canal Tor establecido. Esperando login."));
             state_.ClearLastError();
             ApplyStickyAuthError();
             {
@@ -2347,7 +2456,8 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             AppendClientLog("ReceiveLoop line=CLIENTE OBSOLETO");
             // The server closes the link; do not keep re-sending credentials to it.
             state_.AddSystemLog(line);
-            FailAuthFatal("El servidor rechazo este cliente como obsoleto (protocolo 2).");
+            FailAuthFatal(UiText("The server rejected this client as obsolete (protocol 2).",
+                                 "El servidor rechazo este cliente como obsoleto (protocolo 2)."));
             break;
         } else if (IsSystemNotice(line, "ACTUALIZADO. RECONECTA")) {
             AppendClientLog("ReceiveLoop line=ACTUALIZADO");
@@ -2355,14 +2465,16 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
             state_.SetConnectionState(ConnState::RECONNECTING);
-            state_.SetStatusDetail("Credenciales actualizadas. Reautenticando en cuanto el canal vuelva a estar listo...");
+            state_.SetStatusDetail(UiText("Credentials updated. Re-authenticating as soon as the channel is ready again...",
+                                          "Credenciales actualizadas. Reautenticando en cuanto el canal vuelva a estar listo..."));
             state_.ClearLastError();
         } else if (IsSystemNotice(line, "ACTUALIZADO")) {
             AppendClientLog("ReceiveLoop line=ACTUALIZADO SIMPLE");
             state_.SetMustChangeCredentials(false);
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
-            state_.SetStatusDetail("Credenciales actualizadas. Finalizando acceso...");
+            state_.SetStatusDetail(UiText("Credentials updated. Completing access...",
+                                          "Credenciales actualizadas. Finalizando acceso..."));
             state_.ClearLastError();
         } else if (IsSystemNotice(line, "CREDENCIALES INCORRECTAS")) {
             AppendClientLog("ReceiveLoop line=CREDENCIALES INCORRECTAS");
@@ -2370,8 +2482,9 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             ResetAuthExchange();
             state_.SetAuthActionPending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
-            state_.SetStatusDetail("Canal Tor listo. Esperando nuevas credenciales.");
-            state_.SetLastError("Credenciales incorrectas.");
+            state_.SetStatusDetail(UiText("Tor channel ready. Waiting for new credentials.",
+                                          "Canal Tor listo. Esperando nuevas credenciales."));
+            state_.SetLastError(UiText("Incorrect credentials.", "Credenciales incorrectas."));
             state_.AddSystemLog("SYSTEM: CREDENCIALES INCORRECTAS.");
         } else if (IsSystemNotice(line, "HWID NO RECONOCIDO")) {
             AppendClientLog("ReceiveLoop line=HWID NO RECONOCIDO");
@@ -2379,8 +2492,10 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             ResetAuthExchange();
             state_.SetAuthActionPending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
-            state_.SetStatusDetail("Canal Tor listo. Acceso denegado por HWID.");
-            state_.SetLastError("Esta maquina no coincide con el HWID autorizado.");
+            state_.SetStatusDetail(UiText("Tor channel ready. Access denied for this HWID.",
+                                          "Canal Tor listo. Acceso denegado por HWID."));
+            state_.SetLastError(UiText("This machine does not match the authorized HWID.",
+                                       "Esta maquina no coincide con el HWID autorizado."));
             state_.AddSystemLog("SYSTEM: HWID NO RECONOCIDO.");
         } else if (IsSystemNotice(line, "ACCESO BLOQUEADO")) {
             AppendClientLog("ReceiveLoop line=ACCESO BLOQUEADO");
@@ -2388,13 +2503,13 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             ResetAuthExchange();
             if (state_.IsAuthenticated()) {
                 std::lock_guard<std::mutex> lock(reloginMutex_);
-                disconnectNotice_ = line.substr(8);
+                disconnectNotice_ = ServerNoticeText(line.substr(8));
             }
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
             state_.SetConnectionState(ConnState::TOR_READY);
-            state_.SetStatusDetail("Canal Tor listo. Acceso bloqueado.");
-            state_.SetLastError("Acceso bloqueado para esta maquina.");
+            state_.SetStatusDetail(UiText("Tor channel ready. Access blocked.", "Canal Tor listo. Acceso bloqueado."));
+            state_.SetLastError(UiText("Access blocked for this machine.", "Acceso bloqueado para esta maquina."));
             state_.AddSystemLog("SYSTEM: ACCESO BLOQUEADO.");
         } else if (IsSystemNotice(line, "KICKED BY ADMIN") || IsSystemNotice(line, "SESION REEMPLAZADA")) {
             AppendClientLog("ReceiveLoop line=SESSION TERMINATED");
@@ -2402,17 +2517,19 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             ForgetSessionCredentials();
             {
                 std::lock_guard<std::mutex> lock(reloginMutex_);
-                disconnectNotice_ = line.substr(8);
+                disconnectNotice_ = ServerNoticeText(line.substr(8));
             }
-            state_.SetLastError(line.substr(8));
+            state_.SetLastError(ServerNoticeText(line.substr(8)));
             state_.AddSystemLog(line);
         } else if (IsSystemNotice(line, "ERROR ACTUALIZANDO USUARIO")) {
             AppendClientLog("ReceiveLoop line=ERROR ACTUALIZANDO USUARIO");
             QueueAutoLogin("", "");
             state_.SetCredentialChangePending(false);
             state_.SetConnectionState(ConnState::FIRST_LOGIN_REQUIRED);
-            state_.SetStatusDetail("Could not complete the initial update.");
-            state_.SetLastError("Could not update the user or key.");
+            state_.SetStatusDetail(UiText("Could not complete the initial update.",
+                                          "No se pudo completar la actualizacion inicial."));
+            state_.SetLastError(UiText("Could not update the user or key.",
+                                       "No se pudo actualizar el usuario o la clave."));
             state_.AddSystemLog("SYSTEM: ERROR ACTUALIZANDO USUARIO.");
         } else if (IsSystemNotice(line, "LIMITE DE CONSULTAS DE CLAVES EXCEDIDO")) {
             AppendClientLog("ReceiveLoop line=KEY LOOKUP LIMIT");
@@ -2430,18 +2547,18 @@ void ChatClient::ReceiveLoop(SocketHandle sock) {
             const std::string reason = line.substr(8);
             {
                 std::lock_guard<std::mutex> lock(reloginMutex_);
-                disconnectNotice_ = reason;
+                disconnectNotice_ = ServerNoticeText(reason);
             }
             backoffCancel_.store(false);
             reconnectDelaySeconds_.store(kTransientBackoffSeconds);
             state_.SetAuthActionPending(false);
             state_.SetCredentialChangePending(false);
-            state_.SetLastError(reason);
+            state_.SetLastError(ServerNoticeText(reason));
             state_.AddSystemLog(line);
             break;
         } else if (IsSystemNotice(line, "CLAVE PUBLICA RECHAZADA")) {
             AppendClientLog("ReceiveLoop line=KEY REJECTED");
-            state_.SetLastError("El servidor rechazo la clave publica.");
+            state_.SetLastError(UiText("The server rejected the public key.", "El servidor rechazo la clave publica."));
             state_.AddSystemLog(line);
         } else {
             AppendClientLog("ReceiveLoop line=UNHANDLED");
@@ -2459,8 +2576,10 @@ void ChatClient::NetworkLoop() {
         if (!river::HasRequiredClientConfig()) {
             state_.SetConnectionState(ConnState::DISCONNECTED);
             state_.SetAuthenticated(false);
-            state_.SetStatusDetail("Configura THE_RIVER_ONION antes de conectar.");
-            state_.SetLastError("Falta la configuracion local: THE_RIVER_ONION (direccion .onion del servidor).");
+            state_.SetStatusDetail(UiText("Set THE_RIVER_ONION before connecting.",
+                                          "Configura THE_RIVER_ONION antes de conectar."));
+            state_.SetLastError(UiText("Missing local configuration: THE_RIVER_ONION (the server's .onion address).",
+                                       "Falta la configuracion local: THE_RIVER_ONION (direccion .onion del servidor)."));
             AppendClientLog("NetworkLoop missing private config");
             ApplyStickyAuthError();
             std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -2471,7 +2590,8 @@ void ChatClient::NetworkLoop() {
         state_.SetMustChangeCredentials(false);
         state_.SetAuthActionPending(false);
         state_.SetCredentialChangePending(false);
-        state_.SetStatusDetail(hadIdentity ? "Restableciendo enlace Tor..." : "Conectando a la red Tor...");
+        state_.SetStatusDetail(hadIdentity ? UiText("Re-establishing the Tor link...", "Restableciendo enlace Tor...")
+                                            : UiText("Connecting to the Tor network...", "Conectando a la red Tor..."));
         AppendClientLog("NetworkLoop CONNECTING");
 
         const int proxyPort = river::TorProxyPort();
@@ -2492,12 +2612,16 @@ void ChatClient::NetworkLoop() {
             AppendClientLog("NetworkLoop ConnectViaTor failed");
             state_.SetConnectionState(ConnState::DISCONNECTED);
             if (IsTermuxEnvironment() && !IsTorProxyReachable(river::kTorProxyIp, proxyPort)) {
-                state_.SetStatusDetail("No local Tor proxy detected at 127.0.0.1:" + std::to_string(proxyPort) + ".");
-                state_.SetLastError(
-                    "En Termux debes iniciar tor antes del cliente. Ejecuta el script run_termux_client.sh con --start-tor o arranca tor manualmente.");
+                state_.SetStatusDetail(UiText("No local Tor proxy detected at 127.0.0.1:" + std::to_string(proxyPort) + ".",
+                                              "No se detecto un proxy Tor local en 127.0.0.1:" + std::to_string(proxyPort) + "."));
+                state_.SetLastError(UiText(
+                    "On Termux start tor before the client: run run_termux_client.sh with --start-tor or start tor manually.",
+                    "En Termux debes iniciar tor antes del cliente. Ejecuta el script run_termux_client.sh con --start-tor o arranca tor manualmente."));
             } else {
-                state_.SetStatusDetail("Could not open an onion circuit to the server.");
-                state_.SetLastError("Tor no disponible o hidden service sin respuesta.");
+                state_.SetStatusDetail(UiText("Could not open an onion circuit to the server.",
+                                              "No se pudo abrir un circuito onion hacia el servidor."));
+                state_.SetLastError(UiText("Tor unavailable or the hidden service is not responding.",
+                                           "Tor no disponible o hidden service sin respuesta."));
             }
             ApplyStickyAuthError();
             for (int i = 0; i < 50 && !stopRequested_.load(); ++i)
@@ -2516,7 +2640,8 @@ void ChatClient::NetworkLoop() {
         }
         AppendClientLog("NetworkLoop TOR_OK");
         state_.SetConnectionState(ConnState::TOR_READY);
-        state_.SetStatusDetail("Canal Tor listo. Esperando banner del servidor...");
+        state_.SetStatusDetail(UiText("Tor channel ready. Waiting for the server banner...",
+                                      "Canal Tor listo. Esperando banner del servidor..."));
         state_.ClearLastError();
         ApplyStickyAuthError();
         tlsOnReceiveThread = true;
@@ -2534,12 +2659,13 @@ void ChatClient::NetworkLoop() {
         state_.SetConnectionState(ConnState::DISCONNECTED);
         state_.SetAuthActionPending(false);
         state_.SetCredentialChangePending(false);
-        state_.SetStatusDetail("Canal cerrado. Reintentando enlace...");
+        state_.SetStatusDetail(UiText("Channel closed. Retrying the link...", "Canal cerrado. Reintentando enlace..."));
         AppendClientLog("NetworkLoop DISCONNECTED");
         const int delay = reconnectDelaySeconds_.exchange(0);
         if (delay > 0) {
             AppendClientLog("NetworkLoop reconnect backoff");
-            state_.SetStatusDetail("Reintento del enlace en " + std::to_string(delay) + " s.");
+            state_.SetStatusDetail(UiText("Retrying the link in " + std::to_string(delay) + " s.",
+                                          "Reintento del enlace en " + std::to_string(delay) + " s."));
             ApplyStickyAuthError();
             for (int i = 0; i < delay * 10 && !stopRequested_.load() && !backoffCancel_.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));

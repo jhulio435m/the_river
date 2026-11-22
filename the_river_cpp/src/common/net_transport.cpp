@@ -2,9 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cerrno>
 #include <cstring>
 #include <algorithm>
 #include <string>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -43,6 +48,69 @@ std::uint32_t LoadU32(const char* in) {
 
 }  // namespace
 
+namespace {
+
+enum class IoOutcome { kData, kClosed, kTimeout, kError };
+
+#ifdef _WIN32
+bool LastErrorIsInterrupt() { return WSAGetLastError() == WSAEINTR; }
+bool LastErrorIsTimeout() {
+    const int e = WSAGetLastError();
+    return e == WSAETIMEDOUT || e == WSAEWOULDBLOCK;
+}
+#else
+bool LastErrorIsInterrupt() { return errno == EINTR; }
+bool LastErrorIsTimeout() { return errno == EAGAIN || errno == EWOULDBLOCK; }
+#endif
+
+// One recv() that is restarted when a signal interrupts it. Signals with a
+// handler installed without SA_RESTART (and any handler at all while
+// SO_RCVTIMEO is set: such recv() calls are never restarted by the kernel, see
+// signal(7)) make recv() fail with EINTR; that is not a link failure.
+IoOutcome RecvSome(SocketHandle sock, char* data, std::size_t size, std::size_t& got) {
+    got = 0;
+    while (true) {
+        const int received = recv(sock, data, static_cast<int>(size), 0);
+        if (received > 0) {
+            got = static_cast<std::size_t>(received);
+            return IoOutcome::kData;
+        }
+        if (received == 0) return IoOutcome::kClosed;
+        if (LastErrorIsInterrupt()) continue;
+        return LastErrorIsTimeout() ? IoOutcome::kTimeout : IoOutcome::kError;
+    }
+}
+
+// Fills data[0..size). allowedTimeouts: how many SO_RCVTIMEO expiries are
+// tolerated before giving up (0: the first timeout fails). idleTimeout is set
+// when the very first recv() timed out with nothing read yet.
+bool RecvExactImpl(SocketHandle sock, char* data, std::size_t size, int allowedTimeouts, bool* idleTimeout) {
+    if (idleTimeout) *idleTimeout = false;
+    if (!IsSocketValid(sock) || (data == nullptr && size > 0)) return false;
+
+    std::size_t totalRead = 0;
+    int timeouts = 0;
+    while (totalRead < size) {
+        std::size_t got = 0;
+        const IoOutcome outcome = RecvSome(sock, data + totalRead, size - totalRead, got);
+        if (outcome == IoOutcome::kData) {
+            totalRead += got;
+            continue;
+        }
+        if (outcome == IoOutcome::kTimeout) {
+            if (totalRead == 0 && idleTimeout) {
+                *idleTimeout = true;
+                return false;
+            }
+            if (++timeouts <= allowedTimeouts) continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 bool SendAll(SocketHandle sock, const char* data, std::size_t size) {
     if (!IsSocketValid(sock) || (data == nullptr && size > 0)) return false;
 
@@ -61,6 +129,9 @@ bool SendAll(SocketHandle sock, const char* data, std::size_t size) {
                         chunkSize,
                         MSG_NOSIGNAL);
 #endif
+        if (sent < 0 && LastErrorIsInterrupt()) continue;
+        // A send timeout (SO_SNDTIMEO) stays fatal: the server relies on it to
+        // drop peers that stopped reading.
         if (sent <= 0) return false;
         totalSent += static_cast<std::size_t>(sent);
     }
@@ -72,18 +143,28 @@ bool SendLine(SocketHandle sock, const std::string& line) {
 }
 
 bool RecvExact(SocketHandle sock, char* data, std::size_t size) {
-    if (!IsSocketValid(sock) || (data == nullptr && size > 0)) return false;
+    return RecvExactImpl(sock, data, size, 0, nullptr);
+}
 
-    std::size_t totalRead = 0;
-    while (totalRead < size) {
-        int received = recv(sock,
-                            data + totalRead,
-                            static_cast<int>(size - totalRead),
-                            0);
-        if (received <= 0) return false;
-        totalRead += static_cast<std::size_t>(received);
-    }
-    return true;
+bool SetSocketCloseOnExec(SocketHandle sock) {
+    if (!IsSocketValid(sock)) return false;
+#ifdef _WIN32
+    return SetHandleInformation(reinterpret_cast<HANDLE>(sock), HANDLE_FLAG_INHERIT, 0) != 0;
+#else
+    const int flags = fcntl(sock, F_GETFD);
+    if (flags < 0) return false;
+    return (flags & FD_CLOEXEC) != 0 || fcntl(sock, F_SETFD, flags | FD_CLOEXEC) == 0;
+#endif
+}
+
+SocketHandle CreateTcpSocket() {
+#if defined(SOCK_CLOEXEC)
+    SocketHandle sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (IsSocketValid(sock)) return sock;
+#endif
+    SocketHandle fallback = socket(AF_INET, SOCK_STREAM, 0);
+    if (IsSocketValid(fallback)) SetSocketCloseOnExec(fallback);
+    return fallback;
 }
 
 bool SendFrame(SocketHandle sock, std::uint16_t type, const std::string& payload) {
@@ -98,24 +179,42 @@ bool SendFrame(SocketHandle sock, std::uint16_t type, const std::string& payload
            (payload.empty() || SendAll(sock, payload.data(), payload.size()));
 }
 
-bool RecvFrame(SocketHandle sock, std::uint16_t& type, std::string& payload, std::size_t maxPayloadBytes) {
+namespace {
+
+RecvStatus RecvFrameImpl(SocketHandle sock, std::uint16_t& type, std::string& payload, std::size_t maxPayloadBytes,
+                         int allowedMidFrameTimeouts, bool reportIdleTimeout) {
     payload.clear();
     type = 0;
 
     char header[kFrameHeaderBytes] = {};
+    bool idle = false;
     // cppcheck-suppress bufferAccessOutOfBounds
-    if (!RecvExact(sock, header, sizeof(header))) return false;
+    if (!RecvExactImpl(sock, header, sizeof(header), allowedMidFrameTimeouts, reportIdleTimeout ? &idle : nullptr))
+        return idle ? RecvStatus::kTimeout : RecvStatus::kFailed;
 
     const std::uint32_t magic = LoadU32(header);
-    if (magic != kFrameMagic) return false;
+    if (magic != kFrameMagic) return RecvStatus::kFailed;
 
     type = LoadU16(header + 4);
     const std::uint32_t length = LoadU32(header + 6);
-    if (length > maxPayloadBytes || length > kAbsoluteMaxPayloadBytes) return false;
+    if (length > maxPayloadBytes || length > kAbsoluteMaxPayloadBytes) return RecvStatus::kFailed;
 
     payload.assign(length, '\0');
     // cppcheck-suppress bufferAccessOutOfBounds
-    return length == 0 || RecvExact(sock, &payload[0], payload.size());
+    if (length != 0 && !RecvExactImpl(sock, &payload[0], payload.size(), allowedMidFrameTimeouts, nullptr))
+        return RecvStatus::kFailed;
+    return RecvStatus::kOk;
+}
+
+}  // namespace
+
+bool RecvFrame(SocketHandle sock, std::uint16_t& type, std::string& payload, std::size_t maxPayloadBytes) {
+    return RecvFrameImpl(sock, type, payload, maxPayloadBytes, 0, false) == RecvStatus::kOk;
+}
+
+RecvStatus RecvFrameOrTimeout(SocketHandle sock, std::uint16_t& type, std::string& payload,
+                              std::size_t maxPayloadBytes, int allowedMidFrameTimeouts) {
+    return RecvFrameImpl(sock, type, payload, maxPayloadBytes, allowedMidFrameTimeouts, true);
 }
 
 bool SendTextFrame(SocketHandle sock, const std::string& payload) {

@@ -55,21 +55,29 @@ void ChatState::SetCredentialChangePending(bool value) {
 }
 
 std::string ChatState::StatusDetail() const {
-    std::lock_guard<std::mutex> lock(uiStateMutex_);
-    return statusDetail_;
+    return StatusDetail(true);
 }
 
-void ChatState::SetStatusDetail(const std::string& value) {
+std::string ChatState::StatusDetail(bool spanish) const {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    return statusDetail_.For(spanish);
+}
+
+void ChatState::SetStatusDetail(const UiText& value) {
     std::lock_guard<std::mutex> lock(uiStateMutex_);
     statusDetail_ = value;
 }
 
 std::string ChatState::LastError() const {
-    std::lock_guard<std::mutex> lock(uiStateMutex_);
-    return lastError_;
+    return LastError(true);
 }
 
-void ChatState::SetLastError(const std::string& value) {
+std::string ChatState::LastError(bool spanish) const {
+    std::lock_guard<std::mutex> lock(uiStateMutex_);
+    return lastError_.For(spanish);
+}
+
+void ChatState::SetLastError(const UiText& value) {
     std::lock_guard<std::mutex> lock(uiStateMutex_);
     lastError_ = value;
 }

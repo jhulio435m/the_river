@@ -83,7 +83,7 @@ void ConfigureTermuxUi(GLFWwindow* window) {
 
     const std::string fontPath = FindPreferredMonospaceFont(RuntimePlatform::Termux);
     if (!fontPath.empty()) {
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 22.0f * uiScale, nullptr, io.Fonts->GetGlyphRangesDefault());
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 22.0f * uiScale, nullptr, UiGlyphRanges());
     }
 
     io.ClipboardUserData = window;

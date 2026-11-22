@@ -172,10 +172,8 @@ start_client() {  # name hwid -> sets CLIENT_PID, CLIENT_WIN
     done
     [ -n "$CLIENT_WIN" ] || { echo "client window for $1 did not appear" >&2; exit 1; }
 }
-# /ping makes the server answer at once, so the link never sits idle for the
-# client's 30 s receive timeout between clips; /clear then empties the feed so
-# every clip starts clean. Both are ordinary client commands (off camera).
-clear_feed() { say "$1" "/ping"; sleep 0.4; say "$1" "/clear"; }
+# /clear empties the feed (off camera) so every clip starts clean.
+clear_feed() { say "$1" "/clear"; sleep 0.3; }
 
 # Login panel geometry (ui_sections.cpp RenderLoginScreen / RenderCredentialChangeScreen),
 # relative to the window's top-left corner; the panels are centred.

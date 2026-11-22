@@ -29,11 +29,14 @@ public:
     bool IsCredentialChangePending() const;
     void SetCredentialChangePending(bool value);
 
+    // Without a language: the Spanish text (the protocol/feed language).
     std::string StatusDetail() const;
-    void SetStatusDetail(const std::string& value);
+    std::string StatusDetail(bool spanish) const;
+    void SetStatusDetail(const UiText& value);
 
     std::string LastError() const;
-    void SetLastError(const std::string& value);
+    std::string LastError(bool spanish) const;
+    void SetLastError(const UiText& value);
     void ClearLastError();
     std::string CurrentIdentity() const;
     void SetCurrentIdentity(const std::string& user);
@@ -86,8 +89,8 @@ private:
     std::atomic<bool> newMessage_{false};
 
     mutable std::mutex uiStateMutex_;
-    std::string statusDetail_;
-    std::string lastError_;
+    UiText statusDetail_;
+    UiText lastError_;
     std::string currentIdentity_;
     std::string lastPrivatePeer_;
 
